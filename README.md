@@ -13,3 +13,27 @@ Mostly it exists to ensure that your managed nodes are up, have decent battery l
 - [ ] add warnings / alerts
 - [ ] look at bt / network interfaces
 - [ ] look at running it on cloud, or sourcing data from mqtt. 
+
+
+# to use - set up venv. 
+
+``` 
+# create venv
+python3 -m venv myenv
+
+# activate venv 
+source myenv/bin/activate
+
+
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install -r requirements.txt
+
+or 
+
+pip install --upgrade pytap2
+pip install --upgrade "meshtastic[cli]"
+pip install --upgrade nicegui
+pip freeze > requirements.txt
+
+```
