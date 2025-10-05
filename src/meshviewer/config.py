@@ -71,6 +71,10 @@ class ConfigManager:
         """Get default connection settings."""
         return self.get('connection', {})
     
+    def get_node_settings(self) -> Dict[str, Any]:
+        """Get node-related settings."""
+        return self.get('nodes', {})
+    
     
     def is_dark_mode(self) -> bool:
         """Check if dark mode is enabled."""

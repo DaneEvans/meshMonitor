@@ -41,3 +41,7 @@ ui_text:
 connection:
   default_tcp_host: "192.168.0.114"
   default_tcp_port: 4403
+
+# Node Activity Settings
+nodes:
+  active_threshold_hours: 3

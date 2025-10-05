@@ -10,6 +10,7 @@ from meshviewer.config import ConfigManager
 
 class MeshViewerGUI:
     """Main GUI class for the MeshViewer application."""
+    # active_threshold is now set from config in __init__
     
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the GUI."""
@@ -23,6 +24,10 @@ class MeshViewerGUI:
         self.show_all_nodes = True
         self.nodes_data: Dict[str, Any] = {}
         
+        # Get active threshold from config
+        node_settings = self.config.get_node_settings()
+        self.active_threshold = node_settings.get('active_threshold_hours', 3)
+        
         # UI components (initialized in setup_ui)
         self.tcp_host = None
         self.tcp_port = None
@@ -31,9 +36,7 @@ class MeshViewerGUI:
         self.show_all_toggle = None
         self.nodes_container = None
         self.refresh_nodes_button = None
-    # To change the theme of NiceGUI, you can use the `ui.colors` object to set primary, secondary, and other color values.
-    # You can also use `ui.dark_mode()` to enable dark mode.
-    # Example: Set a custom theme (call this in __init__ or setup_ui as needed)
+
     def set_theme(self):
         """Set NiceGUI theme colors and mode using native theming."""
         colors = self.config.get_theme_colors()
@@ -61,12 +64,14 @@ class MeshViewerGUI:
         dark.enable()
         ui.switch('Dark mode').bind_value(dark)
 
-        with ui.row().classes('w-full'):
-            with ui.column().classes('w-2/3'):
+        # Responsive layout: on small screens, connection panel on top; on large screens, nodes panel on left
+        with ui.row().classes('w-full flex-col md:flex-row gap-4'):
+            with ui.column().classes('w-full md:w-2/3 order-2 md:order-1'):
                 self._setup_nodes_panel()
-
-            with ui.column().classes('w-1/4'):
+            with ui.column().classes('w-full md:w-1/4 order-1 md:order-2'):
                 self._setup_connection_panel()
+        # Increase minimum width for the dark mode switch by 30%
+        ui.query('label:has(input[type="checkbox"])').style('min-width: 130%')
             
 
     
@@ -78,9 +83,15 @@ class MeshViewerGUI:
         with ui.card().classes('w-full'):
             ui.label(ui_text.get('title', 'Connection')).classes('text-h6')
             
-            with ui.row().classes('w-full'):
-                self.tcp_host = ui.input('TCP Host', value=connection_defaults.get('default_tcp_host', '192.168.0.114')).classes('flex-1')
-                self.tcp_port = ui.number('Port', value=connection_defaults.get('default_tcp_port', 4403)).classes('w-20')
+            with ui.row().classes('w-full max-w-full items-center gap-2 flex-nowrap'):
+                self.tcp_host = ui.input('TCP Host', value=connection_defaults.get('default_tcp_host', '192.168.0.114')).classes('flex-1 min-w-0')
+                self.tcp_port = ui.number(
+                    'Port',
+                    value=connection_defaults.get('default_tcp_port', 4403),
+                    min=0,
+                    max=9999,
+                    step=1
+                ).classes('w-1/6 min-w-0').props('maxlength=4')
                 ui.button('Connect TCP', on_click=self.connect_tcp).classes('w-1/4')
 
             
@@ -98,6 +109,30 @@ class MeshViewerGUI:
         ui_text = self.config.get_ui_text().get('nodes', {})
         
         with ui.card().classes('w-full'):
+            # Node count display at the top
+            def get_node_count_info(_=None):
+                if not self.connected or not self.mesh_interface or not hasattr(self.mesh_interface, 'interface'):
+                    return "Total Nodes: 0 | Active (3h): 0"
+                
+                nodes = list(self.mesh_interface.interface.nodes.values())
+                total_nodes = len(nodes)
+                
+                # Count nodes heard from in the last 3 hours
+                import time
+                current_time = int(time.time())
+                three_hours_ago = current_time - (self.active_threshold * 3600)
+                active_nodes = 0
+                
+                for node in nodes:
+                    if 'lastHeard' in node and node['lastHeard'] >= three_hours_ago:
+                        active_nodes += 1
+                
+                return f"Nodes online: {active_nodes}/{total_nodes}"
+
+            self.node_count_label = ui.label(get_node_count_info()).classes('text-h6 text-center w-full mb-2')
+            self.node_count_label.bind_text_from(self, 'connected', get_node_count_info)
+            self.node_count_label.bind_text_from(self, 'mesh_interface', get_node_count_info)
+            
             with ui.row().classes('w-full items-center justify-between'):
                 self.nodes_title = ui.label(ui_text.get('title_favorites', 'Favourite Nodes')).classes('text-h6')
                 self.nodes_title.bind_text_from(self, 'show_all_nodes', lambda v: ui_text.get('title_all', 'All Mesh Nodes') if v else ui_text.get('title_favorites', 'Favourite Nodes'))
@@ -155,6 +190,9 @@ class MeshViewerGUI:
         
         self.nodes_data = self.mesh_interface.get_all_nodes_data()
         self._update_nodes_display()
+        # Update the node count display
+        if hasattr(self, 'node_count_label'):
+            self.node_count_label.update()
     
     def _update_nodes_display(self) -> None:
         """Update the nodes display with current data."""
@@ -213,16 +251,8 @@ class MeshViewerGUI:
             bg_color, font_color = self.get_nodechip_colour(node_id)
             label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
 
-            # The "summary" (simplified view) goes in the expansion's "title" slot.
-            # NiceGUI's ui.expansion uses the first argument as the header/summary.
-            # We'll build a row for the summary, showing shortName, longName, HW, and User ID.
-
-            # Avoid passing a function as the expansion header, since NiceGUI tries to serialize it and this causes
-            # "Type is not JSON serializable: function" errors. Instead, build the summary content inline.
-
             with ui.expansion(value=False).classes('w-full') as exp:
-                with exp.add_slot('header'):
-                    # Visible all the time
+                with exp.add_slot('header'):  # Visible all the time
                     with ui.row().classes('w-full items-center justify-between'):
                         with ui.row().classes('items-left'):
                             with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
@@ -233,17 +263,17 @@ class MeshViewerGUI:
                                 battery_info = self.mesh_interface.get_battery_levels(node)
                                 last_heard_info = self.mesh_interface.get_last_heard_string(node)
                                 ui.label(battery_info).classes('text-sm')
-                                ui.label(last_heard_info).classes('text-sm text-gray-600')
+                                ui.label(last_heard_info).classes('text-sm')
 
                 # The expansion content is the detailed view
                 with ui.row().classes('w-full items-center justify-between'):
                     if 'deviceMetrics' in node:
                         uptime_info = self.mesh_interface.get_uptime_string(node)
-                        ui.label(uptime_info).classes('text-sm text-gray-600')
+                        ui.label(uptime_info).classes('text-sm')
                         channel_util = node['deviceMetrics']['channelUtilization'] * 100
-                        ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption text-gray-600')
-                    ui.label(f"{ui_text.get('hw_label', 'HW')}: {node['user']['hwModel']}").classes('text-caption text-gray-600')
-                    ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption text-gray-600')
+                        ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption')
+                    ui.label(f"{ui_text.get('hw_label', 'HW')}: {node['user']['hwModel']}").classes('text-caption')
+                    ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption')
 
 
     def _clear_nodes_display(self) -> None:
@@ -252,6 +282,9 @@ class MeshViewerGUI:
         ui_text = self.config.get_ui_text().get('nodes', {})
         with self.nodes_container:
             ui.label(ui_text.get('not_connected', 'Not connected')).classes('text-gray-500')
+        # Reset node count display
+        if hasattr(self, 'node_count_label'):
+            self.node_count_label.update()
     
     def run(self, **kwargs) -> None:
         """Run the GUI application."""
