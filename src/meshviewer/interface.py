@@ -2,7 +2,7 @@
 Meshtastic interface module for handling network connections and node data.
 """
 from typing import List, Dict, Any, Optional
-
+import time
 
 class MeshInterface:
     """Interface for interacting with Meshtastic network nodes."""
@@ -28,7 +28,50 @@ class MeshInterface:
             Formatted uptime string
         """
         uptime_hours = node['deviceMetrics']['uptimeSeconds'] / 3600
-        return f"up {uptime_hours:7.1f} hrs"
+        return f"up {uptime_hours:4.1f} hrs"
+
+    def get_last_heard_delta_string(self, node: Dict[str, Any]) -> str:
+        """
+        Get formatted uptime string for a node.
+        
+        Args:
+            node: Node data dictionary
+            
+        Returns:
+            Formatted uptime string
+        """
+        lastHeard = node['lastHeard']
+        # Convert lastHeard (epoch seconds) to "time ago" string (hh:mm:ss)
+        now = int(time.time())
+        delta = now - lastHeard
+        if delta < 0:
+            # Future time, just show 0
+            delta = 0
+        hours = delta // 3600
+        minutes = (delta % 3600) // 60
+        seconds = delta % 60
+        timeAgo = f"{hours:02}:{minutes:02}:{seconds:02}"
+        return f"last heard T-{timeAgo} Ago"
+
+    def get_last_heard_string(self, node: Dict[str, Any]) -> str:
+        """
+        Get the timestamp string for when the node was last heard.
+
+        Args:
+            node: Node data dictionary
+
+        Returns:
+            Formatted last heard timestamp string
+        """
+        lastHeard = node['lastHeard']
+        # Convert lastHeard (epoch seconds) to human-readable time
+        now = int(time.time())
+        delta = now - lastHeard
+        if delta > 6 * 3600:
+            last_heard_str = time.strftime("%H:%M %d/%m/%Y", time.localtime(lastHeard))
+        else:
+            last_heard_str = time.strftime("%H:%M", time.localtime(lastHeard))
+        return f"RX'd {last_heard_str}"
 
     def get_battery_levels(self, node: Dict[str, Any]) -> str:
         """
@@ -63,9 +106,9 @@ class MeshInterface:
             node_keys = node.keys()
             
             if whole_mesh and "deviceMetrics" in node_keys:
-                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_battery_levels(node)} : {self.get_uptime_string(node)}")
+                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_battery_levels(node)} : {self.get_last_heard_string(node)} - {self.get_uptime_string(node)}")
             elif "isFavorite" in node_keys:
-                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_battery_levels(node)} : {self.get_uptime_string(node)}")
+                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_battery_levels(node)} : {self.get_last_heard_string(node)} - {self.get_uptime_string(node)}")
 
     def find_non_favorites_string(self) -> None:
         """Print nodes that are not marked as favorites."""
