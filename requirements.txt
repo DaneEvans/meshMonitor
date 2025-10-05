@@ -6,6 +6,7 @@ dbus-fast==2.44.5
 dotmap==1.3.30
 idna==3.10
 meshtastic==2.7.3
+nicegui==1.4.25
 packaging==24.2
 print-color==0.4.6
 protobuf==6.32.1
