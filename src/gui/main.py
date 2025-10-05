@@ -40,27 +40,25 @@ class MeshViewerGUI:
         
         # Set NiceGUI colors (this handles all the theming automatically)
         ui.colors(
-            primary=colors.get('primary', '#19d275'),
-            secondary=colors.get('secondary', '#7519d2'),
-            accent=colors.get('accent', '#d27519'),
+            primary=colors.get('primary', '#2c2d3c'),
+            secondary=colors.get('secondary', '#234d20'),
+            accent=colors.get('accent', '#c9df8a'),
             positive=colors.get('positive', '#21BA45'),
             negative=colors.get('negative', '#C10015')
         )
-        dark = ui.dark_mode()
-        dark.enable
-
 
     def setup_ui(self) -> None:
         """Setup the main UI components."""
         ui.page_title(self.config.get('app.page_title', 'MeshViewer - Meshtastic Network Monitor'))
         
         with ui.header().classes('items-center justify-between'):
+            logo_path = self.config.get('app.logo_path')
+            ui.image(logo_path).style('max-width: 10vw; height: auto;')
             ui.label(self.config.get('app.title', 'MeshViewer')).classes('text-h4')
             ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+        
         dark = ui.dark_mode()
         dark.enable()
-
-        
         ui.switch('Dark mode').bind_value(dark)
 
         with ui.row().classes('w-full'):

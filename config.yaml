@@ -6,11 +6,12 @@ app:
   title: "MeshViewer"
   subtitle: "Meshtastic Network Monitor"
   page_title: "MeshViewer - Meshtastic Network Monitor"
+  logo_path: "assets/M-PWRD.png"
 
 # Theme Configuration
 theme:
   colors:
-    primary: "#36802d"
+    primary: "#2c2d3c"
     secondary: "#234d20"
     accent: "#c9df8a"
     positive: "#21BA45"
