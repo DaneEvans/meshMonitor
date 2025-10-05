@@ -8,7 +8,7 @@ from .connection import MeshConnectionManager
 from .interface import MeshInterface
 
 
-def text_oneshot(mesh_interface: MeshInterface) -> None:
+def text_oneshot(mesh_interface: MeshInterface, debug=False) -> None:
     """
     Text-based one-shot display of network status.
     
@@ -18,6 +18,10 @@ def text_oneshot(mesh_interface: MeshInterface) -> None:
     print("=== Meshtastic Network Status ===")
     mesh_interface.get_battery_string(whole_mesh=True)
     print()
+
+    if debug:
+        mesh_interface.get_single_node_dump()
+        print()
 
 
 def continuous_text(mesh_interface: MeshInterface, interval: int = 30) -> None:

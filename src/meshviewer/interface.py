@@ -73,6 +73,22 @@ class MeshInterface:
             last_heard_str = time.strftime("%H:%M", time.localtime(lastHeard))
         return f"RX'd {last_heard_str}"
 
+    def get_single_node_dump(self):
+        node_ids = list(self.interface.nodes.keys())
+        if node_ids:
+            node_id = node_ids[0]
+        else:
+            return
+        node = self.interface.nodes[node_id]
+        node_keys = node.keys()
+        print("Single node dump:")
+        print(node_keys)
+        print()
+        print(node)
+
+        return(node)        
+
+
     def get_battery_levels(self, node: Dict[str, Any]) -> str:
         """
         Get formatted battery information for a node.

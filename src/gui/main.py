@@ -183,32 +183,42 @@ class MeshViewerGUI:
     def _create_node_card(self, node_id: str, node: Dict[str, Any]) -> None:
         """Create a card for displaying node information."""
         with ui.card().classes('w-full mb-2'):
-            with ui.row().classes('w-full items-center justify-between'):
-                # with ui.column().classes('flex-1'):
-                #     with ui.row().classes('w-1/2 items-left'):
-                        bg_color, font_color = self.get_nodechip_colour(node_id)
-                        label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
+            bg_color, font_color = self.get_nodechip_colour(node_id)
+            label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
+
+            # The "summary" (simplified view) goes in the expansion's "title" slot.
+            # NiceGUI's ui.expansion uses the first argument as the header/summary.
+            # We'll build a row for the summary, showing shortName, longName, HW, and User ID.
+
+            # Avoid passing a function as the expansion header, since NiceGUI tries to serialize it and this causes
+            # "Type is not JSON serializable: function" errors. Instead, build the summary content inline.
+
+            with ui.expansion(value=False).classes('w-full') as exp:
+                with exp.add_slot('header'):
+                    # Visible all the time
+                    with ui.row().classes('w-full items-center justify-between'):
                         with ui.row().classes('items-left'):
                             with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
                                 ui.label(node['user']['shortName']).classes(label_classes)
                             ui.label(node['user']['longName']).classes('text-h6')
-
-                # with ui.row().classes('w-1/2 items-left'):
                         with ui.row().classes('items-right'):
-                            ui.label(f"HW: {node['user']['hwModel']}").classes('text-caption text-gray-600')
-                            ui.label(f"User ID: {node_id}").classes('text-caption text-gray-600')
+                            if 'deviceMetrics' in node:
+                                battery_info = self.mesh_interface.get_battery_levels(node)
+                                last_heard_info = self.mesh_interface.get_last_heard_string(node)
+                                ui.label(battery_info).classes('text-sm')
+                                ui.label(last_heard_info).classes('text-sm text-gray-600')
 
-            with ui.row().classes('w-full items-center justify-between'):
+                # The expansion content is the detailed view
+                with ui.row().classes('w-full items-center justify-between'):
+                    if 'deviceMetrics' in node:
+                        uptime_info = self.mesh_interface.get_uptime_string(node)
+                        ui.label(uptime_info).classes('text-sm text-gray-600')
+                        channel_util = node['deviceMetrics']['channelUtilization'] * 100
+                        ui.label(f"Channel Util: {channel_util:.1f}%").classes('text-caption text-gray-600')
+                    ui.label(f"HW: {node['user']['hwModel']}").classes('text-caption text-gray-600')
+                    ui.label(f"User ID: {node_id}").classes('text-caption text-gray-600')
 
-                # with ui.column().classes('text-right'):
-                if 'deviceMetrics' in node:
-                    battery_info = self.mesh_interface.get_battery_levels(node)
-                    last_heard_info = self.mesh_interface.get_last_heard_string(node)
-                    uptime_info = self.mesh_interface.get_uptime_string(node)
-                    ui.label(battery_info).classes('text-sm')
-                    ui.label(last_heard_info).classes('text-sm text-gray-600')
-                    ui.label(uptime_info).classes('text-sm text-gray-600')
-    
+
     def _clear_nodes_display(self) -> None:
         """Clear the nodes display."""
         self.nodes_container.clear()
