@@ -5,14 +5,18 @@ from nicegui import ui
 from typing import Optional, Dict, Any
 from meshviewer.connection import MeshConnectionManager
 from meshviewer.interface import MeshInterface
+from meshviewer.config import ConfigManager
 
 
 class MeshViewerGUI:
     """Main GUI class for the MeshViewer application."""
     
-    def __init__(self):
+    def __init__(self, config_path: Optional[str] = None):
         """Initialize the GUI."""
+        self.config = ConfigManager(config_path)
+
         self.set_theme()
+
         self.connection_manager = MeshConnectionManager()
         self.mesh_interface: Optional[MeshInterface] = None
         self.connected = False
@@ -31,20 +35,34 @@ class MeshViewerGUI:
     # You can also use `ui.dark_mode()` to enable dark mode.
     # Example: Set a custom theme (call this in __init__ or setup_ui as needed)
     def set_theme(self):
-        """Set NiceGUI theme colors and mode."""
-        # Example: set primary and secondary colors
-        ui.colors(primary='#19d275', secondary='#7519d2', accent='#d27519', positive='#21BA45', negative='#C10015')
-        # Enable dark mode (optional)
-        # ui.dark_mode()  # Uncomment to enable dark mode
+        """Set NiceGUI theme colors and mode using native theming."""
+        colors = self.config.get_theme_colors()
+        
+        # Set NiceGUI colors (this handles all the theming automatically)
+        ui.colors(
+            primary=colors.get('primary', '#19d275'),
+            secondary=colors.get('secondary', '#7519d2'),
+            accent=colors.get('accent', '#d27519'),
+            positive=colors.get('positive', '#21BA45'),
+            negative=colors.get('negative', '#C10015')
+        )
+        dark = ui.dark_mode()
+        dark.enable
+
 
     def setup_ui(self) -> None:
         """Setup the main UI components."""
-        ui.page_title("MeshViewer - Meshtastic Network Monitor")
+        ui.page_title(self.config.get('app.page_title', 'MeshViewer - Meshtastic Network Monitor'))
         
         with ui.header().classes('items-center justify-between'):
-            ui.label('MeshViewer').classes('text-h4')
-            ui.label('Meshtastic Network Monitor').classes('text-subtitle2')
+            ui.label(self.config.get('app.title', 'MeshViewer')).classes('text-h4')
+            ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+        dark = ui.dark_mode()
+        dark.enable()
+
         
+        ui.switch('Dark mode').bind_value(dark)
+
         with ui.row().classes('w-full'):
             with ui.column().classes('w-2/3'):
                 self._setup_nodes_panel()
@@ -56,12 +74,15 @@ class MeshViewerGUI:
     
     def _setup_connection_panel(self) -> None:
         """Setup the connection control panel."""
+        ui_text = self.config.get_ui_text().get('connection', {})
+        connection_defaults = self.config.get_connection_defaults()
+        
         with ui.card().classes('w-full'):
-            ui.label('Connection').classes('text-h6')
+            ui.label(ui_text.get('title', 'Connection')).classes('text-h6')
             
             with ui.row().classes('w-full'):
-                self.tcp_host = ui.input('TCP Host', value='192.168.0.114').classes('flex-1')
-                self.tcp_port = ui.number('Port', value=4403).classes('w-20')
+                self.tcp_host = ui.input('TCP Host', value=connection_defaults.get('default_tcp_host', '192.168.0.114')).classes('flex-1')
+                self.tcp_port = ui.number('Port', value=connection_defaults.get('default_tcp_port', 4403)).classes('w-20')
                 ui.button('Connect TCP', on_click=self.connect_tcp).classes('w-1/4')
 
             
@@ -72,14 +93,16 @@ class MeshViewerGUI:
             with ui.row().classes('w-full gap-2'):
                 ui.button('Disconnect', on_click=self.disconnect).classes('flex-1').bind_visibility_from(self, 'connected')
             
-            self.connection_status = ui.label('Disconnected').classes('text-caption')
+            self.connection_status = ui.label(ui_text.get('disconnected_status', 'Disconnected')).classes('text-caption')
     
     def _setup_nodes_panel(self) -> None:
         """Setup the nodes display panel."""
+        ui_text = self.config.get_ui_text().get('nodes', {})
+        
         with ui.card().classes('w-full'):
             with ui.row().classes('w-full items-center justify-between'):
-                self.nodes_title = ui.label('Favourite Nodes' if not self.show_all_nodes else 'All Mesh Nodes').classes('text-h6')
-                self.nodes_title.bind_text_from(self, 'show_all_nodes', lambda v: 'All Mesh Nodes' if v else 'Favourite Nodes')
+                self.nodes_title = ui.label(ui_text.get('title_favorites', 'Favourite Nodes')).classes('text-h6')
+                self.nodes_title.bind_text_from(self, 'show_all_nodes', lambda v: ui_text.get('title_all', 'All Mesh Nodes') if v else ui_text.get('title_favorites', 'Favourite Nodes'))
                 self.show_all_toggle = ui.checkbox('Show all Nodes', value=False).bind_value(self, 'show_all_nodes').on('update:model-value', lambda e: self.refresh_nodes())
             
             self.nodes_container = ui.column().classes('w-full')
@@ -89,30 +112,32 @@ class MeshViewerGUI:
         """Connect via TCP."""
         host = self.tcp_host.value
         port = int(self.tcp_port.value)
+        ui_text = self.config.get_ui_text().get('connection', {})
         
         if self.connection_manager.connect_tcp(host, port):
             self.mesh_interface = MeshInterface(self.connection_manager.get_interface())
             self.connected = True
-            self.connection_status.text = f'Connected via TCP to {host}:{port}'
+            self.connection_status.text = ui_text.get('connected_tcp_status', 'Connected via TCP to {host}:{port}').format(host=host, port=port)
             self.connection_status.classes('text-green')
             self.refresh_nodes()
         else:
-            self.connection_status.text = 'TCP connection failed'
+            self.connection_status.text = ui_text.get('connection_failed_tcp', 'TCP connection failed')
             self.connection_status.classes('text-red')
     
     def connect_serial(self) -> None:
         """Connect via Serial."""
         port = self.serial_port.value if self.serial_port.value else None
+        ui_text = self.config.get_ui_text().get('connection', {})
         
         if self.connection_manager.connect_serial(port):
             self.mesh_interface = MeshInterface(self.connection_manager.get_interface())
             self.connected = True
             port_display = port or 'auto-detected'
-            self.connection_status.text = f'Connected via Serial on {port_display}'
+            self.connection_status.text = ui_text.get('connected_serial_status', 'Connected via Serial on {port}').format(port=port_display)
             self.connection_status.classes('text-green')
             self.refresh_nodes()
         else:
-            self.connection_status.text = 'Serial connection failed'
+            self.connection_status.text = ui_text.get('connection_failed_serial', 'Serial connection failed')
             self.connection_status.classes('text-red')
     
     def disconnect(self) -> None:
@@ -120,7 +145,8 @@ class MeshViewerGUI:
         self.connection_manager.disconnect()
         self.mesh_interface = None
         self.connected = False
-        self.connection_status.text = 'Disconnected'
+        ui_text = self.config.get_ui_text().get('connection', {})
+        self.connection_status.text = ui_text.get('disconnected_status', 'Disconnected')
         self.connection_status.classes('text-gray')
         self._clear_nodes_display()
     
@@ -135,10 +161,11 @@ class MeshViewerGUI:
     def _update_nodes_display(self) -> None:
         """Update the nodes display with current data."""
         self.nodes_container.clear()
+        ui_text = self.config.get_ui_text().get('nodes', {})
         
         if not self.nodes_data:
             with self.nodes_container:
-                ui.label('No nodes found').classes('text-gray-500')
+                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
             return
         
         for node_id, node in self.nodes_data.items():
@@ -182,6 +209,8 @@ class MeshViewerGUI:
 
     def _create_node_card(self, node_id: str, node: Dict[str, Any]) -> None:
         """Create a card for displaying node information."""
+        ui_text = self.config.get_ui_text().get('nodes', {})
+        
         with ui.card().classes('w-full mb-2'):
             bg_color, font_color = self.get_nodechip_colour(node_id)
             label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
@@ -199,7 +228,7 @@ class MeshViewerGUI:
                     with ui.row().classes('w-full items-center justify-between'):
                         with ui.row().classes('items-left'):
                             with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
-                                ui.label(node['user']['shortName']).classes(label_classes)
+                                ui.label(node['user']['shortName']).classes(label_classes).style(f'color: {font_color};')
                             ui.label(node['user']['longName']).classes('text-h6')
                         with ui.row().classes('items-right'):
                             if 'deviceMetrics' in node:
@@ -214,16 +243,17 @@ class MeshViewerGUI:
                         uptime_info = self.mesh_interface.get_uptime_string(node)
                         ui.label(uptime_info).classes('text-sm text-gray-600')
                         channel_util = node['deviceMetrics']['channelUtilization'] * 100
-                        ui.label(f"Channel Util: {channel_util:.1f}%").classes('text-caption text-gray-600')
-                    ui.label(f"HW: {node['user']['hwModel']}").classes('text-caption text-gray-600')
-                    ui.label(f"User ID: {node_id}").classes('text-caption text-gray-600')
+                        ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption text-gray-600')
+                    ui.label(f"{ui_text.get('hw_label', 'HW')}: {node['user']['hwModel']}").classes('text-caption text-gray-600')
+                    ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption text-gray-600')
 
 
     def _clear_nodes_display(self) -> None:
         """Clear the nodes display."""
         self.nodes_container.clear()
+        ui_text = self.config.get_ui_text().get('nodes', {})
         with self.nodes_container:
-            ui.label('Not connected').classes('text-gray-500')
+            ui.label(ui_text.get('not_connected', 'Not connected')).classes('text-gray-500')
     
     def run(self, **kwargs) -> None:
         """Run the GUI application."""

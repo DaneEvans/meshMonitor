@@ -1,0 +1,42 @@
+# MeshViewer Configuration File
+# This file contains configurable text and theme settings for the GUI
+
+# Application Settings
+app:
+  title: "MeshViewer"
+  subtitle: "Meshtastic Network Monitor"
+  page_title: "MeshViewer - Meshtastic Network Monitor"
+
+# Theme Configuration
+theme:
+  colors:
+    primary: "#36802d"
+    secondary: "#234d20"
+    accent: "#c9df8a"
+    positive: "#21BA45"
+    negative: "#C10015"
+  # dark_mode: true
+
+# UI Text Labels
+ui_text:
+  connection:
+    title: "Connection"
+    disconnected_status: "Disconnected"
+    connected_tcp_status: "Connected via TCP to {host}:{port}"
+    connected_serial_status: "Connected via Serial on {port}"
+    connection_failed_tcp: "TCP connection failed"
+    connection_failed_serial: "Serial connection failed"
+  
+  nodes:
+    title_favorites: "Favourite Nodes"
+    title_all: "All Mesh Nodes"
+    no_nodes_found: "No nodes found"
+    not_connected: "Not connected"
+    channel_util_label: "Channel Util"
+    hw_label: "HW"
+    user_id_label: "User ID"
+
+# Default Connection Settings
+connection:
+  default_tcp_host: "192.168.0.114"
+  default_tcp_port: 4403

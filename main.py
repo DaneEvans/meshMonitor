@@ -52,7 +52,7 @@ class MeshViewerApp:
         
         print("Cleanup completed.")
     
-    def run(self, host='0.0.0.0', port=8080, show=True):
+    def run(self, host='0.0.0.0', port=8080, show=True, config_path=None):
         """Run the application with proper signal handling."""
         print("Starting MeshViewer...")
         print("Use Ctrl+C to terminate.")
@@ -60,8 +60,8 @@ class MeshViewerApp:
         # Setup signal handlers
         self.setup_signal_handlers()
         
-        # Create and run the GUI
-        self.app = MeshViewerGUI()
+        # Create and run the GUI with optional config path
+        self.app = MeshViewerGUI(config_path=config_path)
         self.app.setup_ui()
         
         try:
