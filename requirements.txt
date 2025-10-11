@@ -8,6 +8,8 @@ idna==3.10
 meshtastic==2.7.3
 nicegui==1.4.25
 packaging==24.2
+pandas>=1.5.0
+plotly>=5.0.0
 print-color==0.4.6
 protobuf==6.32.1
 Pypubsub==4.0.3

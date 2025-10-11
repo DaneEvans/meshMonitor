@@ -6,7 +6,9 @@ from typing import Optional, Dict, Any
 from meshviewer.connection import MeshConnectionManager
 from meshviewer.interface import MeshInterface
 from meshviewer.config import ConfigManager
+from meshviewer.data_persistence import DataPersistence
 import time
+import plotly.graph_objects as go
 
 
 class MeshViewerGUI:
@@ -26,6 +28,9 @@ class MeshViewerGUI:
         self.show_all_nodes = True
         self.nodes_data: Dict[str, Any] = {}
         
+        # Initialize data persistence
+        self.data_persistence = DataPersistence()
+        
         # Get active threshold from config
         node_settings = self.config.get_node_settings()
         self.active_threshold = node_settings.get('active_threshold_hours', 3)
@@ -39,6 +44,8 @@ class MeshViewerGUI:
         self.nodes_container = None
         self.refresh_nodes_button = None
         self.auto_refresh_timer = None
+        self.tabs = None
+        self.battery_chart = None
 
     def set_theme(self):
         """Set NiceGUI theme colors and mode using native theming."""
@@ -66,14 +73,24 @@ class MeshViewerGUI:
         self.dark.enable()
         ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
 
-        # Responsive layout: on small screens, connection panel on top; on large screens, nodes panel on left
-        with ui.row().classes('w-full flex-col md:flex-row gap-4'):
-            with ui.column().classes('w-full md:w-2/3 order-2 md:order-1'):
-                self._setup_nodes_panel()
-            with ui.column().classes('w-full md:w-1/4 order-1 md:order-2'):
-                self._setup_connection_panel()
-        # Increase minimum width for the dark mode switch by 30%
-        ui.query('label:has(input[type="checkbox"])').style('min-width: 130%')
+        # Create tabs for different views
+        with ui.tabs().classes('w-full') as self.tabs:
+            ui.tab('Network View', icon='network_check')
+            ui.tab('Battery History', icon='battery_charging_full')
+        
+        with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
+            with ui.tab_panel('Network View'):
+                # Responsive layout: on small screens, connection panel on top; on large screens, nodes panel on left
+                with ui.row().classes('w-full flex-col md:flex-row gap-4'):
+                    with ui.column().classes('w-full md:w-2/3 order-2 md:order-1'):
+                        self._setup_nodes_panel()
+                    with ui.column().classes('w-full md:w-1/4 order-1 md:order-2'):
+                        self._setup_connection_panel()
+                # Increase minimum width for the dark mode switch by 30%
+                ui.query('label:has(input[type="checkbox"])').style('min-width: 130%')
+            
+            with ui.tab_panel('Battery History'):
+                self._setup_battery_history_panel()
             
 
     
@@ -124,7 +141,6 @@ class MeshViewerGUI:
                 total_nodes = len(nodes)
                 
                 # Count nodes heard from in the last 3 hours
-                import time
                 current_time = int(time.time())
                 three_hours_ago = current_time - (self.active_threshold * 3600)
                 active_nodes = 0
@@ -146,6 +162,39 @@ class MeshViewerGUI:
             
             self.nodes_container = ui.column().classes('w-full')
             self.refresh_nodes_button = ui.button('Refresh', on_click=self.refresh_nodes).bind_visibility_from(self, 'connected')
+    
+    def _setup_battery_history_panel(self) -> None:
+        """Setup the battery history panel."""
+        with ui.card().classes('w-full'):
+            ui.label('Battery History').classes('text-h6 mb-4')
+            
+            # Controls
+            with ui.row().classes('w-full items-center gap-4 mb-4'):
+                self.days_selector = ui.select(
+                    options={
+                        0.042: '1 Hour', 0.25: '6 Hours', 0.5: '12 Hours',
+                        1: '1 Day', 3: '3 Days', 7: '7 Days', 14: '14 Days', 30: '30 Days'
+                    },
+                    value=7,
+                    label='Time Period'
+                ).classes('w-32').on('update:model-value', lambda e: self.update_battery_chart())
+                
+                self.node_selector = ui.select(
+                    options={},
+                    value=None,
+                    label='Node'
+                ).classes('flex-1').on('update:model-value', lambda e: self.update_battery_chart())
+                
+                ui.button('Refresh Chart', on_click=self.update_battery_chart).classes('w-32')
+            
+            # Chart container
+            self.battery_chart_container = ui.column().classes('w-full')
+            
+            # Data summary
+            self.data_summary_container = ui.column().classes('w-full mt-4')
+            
+            # Initial load
+            self.update_battery_chart()
     
     def connect_tcp(self) -> None:
         """Connect via TCP."""
@@ -212,6 +261,10 @@ class MeshViewerGUI:
         self.mesh_interface.force_last_heard_update()
         
         self.nodes_data = self.mesh_interface.get_all_nodes_data()
+        
+        # Save data to persistence layer
+        self.data_persistence.save_nodes_data(self.nodes_data)
+        
         self._update_nodes_display()
         # Update the node count display
         if hasattr(self, 'node_count_label'):
@@ -361,7 +414,7 @@ class MeshViewerGUI:
         )
 
     def render_last_heard(self, node):
-        last_heard = self.mesh_interface.get_last_heard(node, asString = False);
+        last_heard = self.mesh_interface.get_last_heard(node, asString = False)
         now = int(time.time())
         delta = now - last_heard
         if delta > 6 * 3600:
@@ -394,6 +447,359 @@ class MeshViewerGUI:
             self.auto_refresh_timer.deactivate()
             self.auto_refresh_timer = None
             print("Auto-refresh stopped")
+    
+    def _get_time_label(self, days: float) -> str:
+        """Generate appropriate time label for the given number of days."""
+        if days < 1:
+            if days == 0.042:  # 1 hour
+                return "1 Hour"
+            elif days == 0.25:  # 6 hours
+                return "6 Hours"
+            elif days == 0.5:  # 12 hours
+                return "12 Hours"
+            else:
+                return f"{days*24:.1f} Hours"
+        else:
+            return f"{days} Days"
+    
+    def update_battery_chart(self) -> None:
+        """Update the battery history chart."""
+        try:
+            # Get data
+            days = self.days_selector.value
+            df = self.data_persistence.get_battery_history(days)
+            print(f"DEBUG: Days selected: {days}")
+            print(f"DEBUG: Raw data shape: {df.shape}")
+            if not df.empty:
+                print(f"DEBUG: Available nodes: {df['node_id'].unique()}")
+                print(f"DEBUG: Data sample: {df[['timestamp', 'node_id', 'short_name', 'voltage', 'battery_level']].head()}")
+            
+            # Update node selector options
+            if not df.empty:
+                unique_nodes = df['node_id'].unique()
+                node_options = {node_id: f"{df[df['node_id'] == node_id].iloc[0]['short_name']} ({node_id[-6:]})" 
+                              for node_id in unique_nodes}
+                self.node_selector.options = node_options
+                # Only set default if no node is currently selected
+                if not self.node_selector.value and node_options:
+                    self.node_selector.value = list(node_options.keys())[0]
+            
+            # Clear containers
+            self.battery_chart_container.clear()
+            self.data_summary_container.clear()
+            self.battery_chart = None  # Reset chart reference
+            print("DEBUG: Containers cleared and chart reset")
+            
+            if df.empty:
+                # Show empty chart with full timespan
+                fig = go.Figure()
+                
+                # Calculate the full timespan for the selected period
+                from datetime import datetime, timedelta
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days)
+                
+                # Add empty traces to show the axes
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Voltage (V)',
+                    line=dict(color='#21BA45', width=2),
+                    marker=dict(size=6, color='#21BA45', line=dict(width=1, color='white'))
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Battery Level (%)',
+                    yaxis='y2',
+                    line=dict(color='#C10015', width=2),
+                    marker=dict(size=6, color='#C10015', line=dict(width=1, color='white'))
+                ))
+                
+                # Update layout with full timespan and reasonable default ranges
+                fig.update_layout(
+                    title=f'Battery History - {self._get_time_label(days)} (No Data)',
+                    xaxis_title='Time',
+                    yaxis=dict(
+                        title='Voltage (V)', 
+                        side='left',
+                        range=[3.0, 4.5],  # Typical battery voltage range
+                        tickformat='.3f'
+                    ),
+                    yaxis2=dict(
+                        title='Battery Level (%)', 
+                        side='right', 
+                        overlaying='y',
+                        range=[0, 100],  # Battery percentage range
+                        tickformat='.0f'
+                    ),
+                    hovermode='x unified',
+                    template='plotly_dark' if self.dark.value else 'plotly_white',
+                    height=500,
+                    xaxis=dict(
+                        range=[start_time, end_time],
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                with self.battery_chart_container:
+                    ui.plotly(fig).classes('w-full')
+                with self.data_summary_container:
+                    ui.label('No battery data available for the selected time period').classes('text-gray-500 text-center')
+                return
+            
+            # Filter by selected node if specified
+            selected_node = self.node_selector.value
+            print(f"DEBUG: Selected node: {selected_node}")
+            print(f"DEBUG: Data shape before filtering: {df.shape}")
+            if selected_node:
+                df = df[df['node_id'] == selected_node]
+                print(f"DEBUG: Data shape after filtering: {df.shape}")
+                
+                # Remove duplicates - keep the latest entry for each timestamp
+                df = df.drop_duplicates(subset=['timestamp'], keep='last')
+                print(f"DEBUG: Data shape after deduplication: {df.shape}")
+                
+                if not df.empty:
+                    print(f"DEBUG: Filtered data sample: {df[['timestamp', 'node_id', 'short_name', 'voltage', 'battery_level']].head()}")
+            
+            # if df.empty:
+            if False:
+                # Show empty chart with full timespan for selected node
+                fig = go.Figure()
+                
+                # Calculate the full timespan for the selected period
+                from datetime import datetime, timedelta
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days)
+                
+                # Add empty traces to show the axes
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Voltage (V)',
+                    line=dict(color='#21BA45', width=2),
+                    marker=dict(size=6, color='#21BA45', line=dict(width=1, color='white'))
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Battery Level (%)',
+                    yaxis='y2',
+                    line=dict(color='#C10015', width=2),
+                    marker=dict(size=6, color='#C10015', line=dict(width=1, color='white'))
+                ))
+                
+                # Get node name for title
+                node_name = "Unknown Node"
+                if selected_node:
+                    # Try to get node name from the original data
+                    all_data = self.data_persistence.get_battery_history(days)
+                    if not all_data.empty:
+                        node_data = all_data[all_data['node_id'] == selected_node]
+                        if not node_data.empty:
+                            node_name = node_data.iloc[0]['short_name']
+                
+                # Update layout with full timespan and reasonable default ranges
+                fig.update_layout(
+                    title=f'Battery History - {self._get_time_label(days)} - {node_name} (No Data)',
+                    xaxis_title='Time',
+                    yaxis=dict(
+                        title='Voltage (V)', 
+                        side='left',
+                        range=[3.0, 4.5],  # Typical battery voltage range
+                        tickformat='.3f'
+                    ),
+                    yaxis2=dict(
+                        title='Battery Level (%)', 
+                        side='right', 
+                        overlaying='y',
+                        range=[0, 100],  # Battery percentage range
+                        tickformat='.0f'
+                    ),
+                    hovermode='x unified',
+                    template='plotly_dark' if self.dark.value else 'plotly_white',
+                    height=500,
+                    xaxis=dict(
+                        range=[start_time, end_time],
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                with self.battery_chart_container:
+                    ui.plotly(fig).classes('w-full')
+                with self.data_summary_container:
+                    ui.label(f'No data available for {node_name} in the selected time period').classes('text-gray-500 text-center')
+                return
+            
+            # Create battery voltage chart
+            fig = go.Figure()
+            
+            # Calculate the full timespan for the selected period
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            start_time = end_time - timedelta(days=days)
+            
+            # Debug: Print the actual data being plotted
+            print(f"DEBUG: Plotting {len(df)} data points")
+            print(f"DEBUG: Voltage range: {df['voltage'].min():.3f}V to {df['voltage'].max():.3f}V")
+            print(f"DEBUG: Battery range: {df['battery_level'].min():.0f}% to {df['battery_level'].max():.0f}%")
+            print(f"DEBUG: Time range: {df['timestamp'].min()} to {df['timestamp'].max()}")
+
+            print("DEBUG: Voltage values:")
+            print(df['voltage'].tolist())
+            print("DEBUG: Battery level values:")
+            print(df['battery_level'].tolist())
+            print("DEBUG: Timestamps:")
+            print(df['timestamp'].tolist())
+            print("DEBUG: Checking for duplicates:")
+            print(f"DEBUG: Total rows: {len(df)}")
+            print(f"DEBUG: Unique timestamps: {df['timestamp'].nunique()}")
+            print(f"DEBUG: Duplicate timestamps: {df['timestamp'].duplicated().sum()}")
+            if df['timestamp'].duplicated().any():
+                print("DEBUG: Duplicate timestamps found:")
+                print(df[df['timestamp'].duplicated(keep=False)].sort_values('timestamp'))
+            
+            # Add voltage line with points
+            fig.add_trace(go.Scatter(
+                x=df['timestamp'],
+                y=df['voltage'].tolist(),
+                mode='markers+lines',
+                name='Voltage (V)',
+                line=dict(color='#21BA45', width=2),
+                marker=dict(size=6, color='#21BA45', line=dict(width=1, color='white')),
+                connectgaps=False
+            ))
+            
+            # Add battery level as secondary y-axis with points
+            fig.add_trace(go.Scatter(
+                x=df['timestamp'],
+                y=df['battery_level'].tolist(),
+                mode='markers+lines',
+                name='Battery Level (%)',
+                yaxis='y2',
+                line=dict(color='#C10015', width=2),
+                marker=dict(size=6, color='#C10015', line=dict(width=1, color='white')),
+                connectgaps=False
+            ))
+
+            fig.add_trace(go.Scatter(
+                y=[0,1,1,4,52,2],
+                x=[0,1,2,3,4,5],
+                mode='markers+lines',
+                name='Battery Level (%)',
+                yaxis='y2',
+                line=dict(color='purple', width=2),
+                marker=dict(size=6, color='#C10015', line=dict(width=1, color='white')),
+                connectgaps=False
+            ))
+
+            
+            # Use consistent axis ranges regardless of data
+            voltage_range = [3.0, 4.5]  # Fixed voltage range
+            battery_range = [0, 100]    # Fixed battery percentage range
+            
+            # Update layout with full timespan and proper axis ranges
+            fig.update_layout(
+                title=f'Battery History - {self._get_time_label(days)}' + (f' - {df.iloc[0]["short_name"]}' if selected_node else ''),
+                xaxis_title='Time',
+                yaxis=dict(
+                    title='Voltage (V)', 
+                    side='left',
+                    range=voltage_range,
+                    tickformat='.3f'
+                ),
+                yaxis2=dict(
+                    title='Battery Level (%)', 
+                    side='right', 
+                    overlaying='y',
+                    range=battery_range,
+                    tickformat='.0f'
+                ),
+                hovermode='x unified',
+                template='plotly_dark' if self.dark.value else 'plotly_white',
+                height=500,
+                xaxis=dict(
+                    range=[start_time, end_time],
+                    # range=[0, 8],
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor='rgba(128,128,128,0.2)'
+                ),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            # Debug: Print figure data
+            print(f"DEBUG: Figure has {len(fig.data)} traces")
+            for i, trace in enumerate(fig.data):
+                print(f"DEBUG: Trace {i}: {trace.name}, {len(trace.x)} x points, {len(trace.y)} y points")
+                if len(trace.x) > 0:
+                    print(f"DEBUG: Trace {i} x range: {min(trace.x)} to {max(trace.x)}")
+                    print(f"DEBUG: Trace {i} y range: {min(trace.y):.3f} to {max(trace.y):.3f}")
+            
+            # Display chart
+            with self.battery_chart_container:
+                # Always create a new chart to ensure it updates
+                self.battery_chart = ui.plotly(fig).classes('w-full')
+                print(f"DEBUG: Chart created/updated with {len(df)} data points")
+            
+            # Display data summary
+            with self.data_summary_container:
+                with ui.row().classes('w-full gap-4'):
+                    with ui.card().classes('flex-1'):
+                        ui.label('Data Summary').classes('text-h6')
+                        ui.label(f'Records: {len(df)}').classes('text-sm')
+                        ui.label(f'Date Range: {df["timestamp"].min().strftime("%Y-%m-%d %H:%M")} to {df["timestamp"].max().strftime("%Y-%m-%d %H:%M")}').classes('text-sm')
+                    
+                    with ui.card().classes('flex-1'):
+                        ui.label('Voltage Stats').classes('text-h6')
+                        ui.label(f'Min: {df["voltage"].min():.3f}V').classes('text-sm')
+                        ui.label(f'Max: {df["voltage"].max():.3f}V').classes('text-sm')
+                        ui.label(f'Avg: {df["voltage"].mean():.3f}V').classes('text-sm')
+                    
+                    with ui.card().classes('flex-1'):
+                        ui.label('Battery Stats').classes('text-h6')
+                        ui.label(f'Min: {df["battery_level"].min():.0f}%').classes('text-sm')
+                        ui.label(f'Max: {df["battery_level"].max():.0f}%').classes('text-sm')
+                        ui.label(f'Avg: {df["battery_level"].mean():.0f}%').classes('text-sm')
+                        
+        except Exception as e:
+            print(f"Error updating battery chart: {e}")
+            with self.battery_chart_container:
+                ui.label(f'Error loading chart: {str(e)}').classes('text-red-500 text-center')
     
     def run(self, **kwargs) -> None:
         """Run the GUI application."""

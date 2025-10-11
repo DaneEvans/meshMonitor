@@ -10,6 +10,9 @@ A Meshtastic network monitoring application with both GUI and CLI interfaces.
 - **Real-time Monitoring**: Live updates of network node status
 - **Battery Monitoring**: Track battery levels and charging status
 - **Uptime Tracking**: Monitor node uptime and network health
+- **Data Persistence**: Automatic storage of node metrics to CSV/JSON files
+- **Battery History**: Interactive charts showing battery voltage trends over time
+- **Historical Analysis**: View battery data for the last 1-30 days
 
 ## Plans 
 Laptop hosted - unless I can port to an app as well? 
@@ -24,8 +27,8 @@ Mostly it exists to ensure that your managed nodes are up, have decent battery l
  - [x] move to getting values, and do string conversion in gui
  - [x] add colours. 
 - [ ] 
-- [ ] add history (db or whatever)
-- [ ] add plots to show last week? of data
+- [x] add history (db or whatever)
+- [x] add plots to show last week? of data
 - [x] add warnings / alerts
 - [x] look at bt / network interfaces
 - [ ] look at running it on cloud, or sourcing data from mqtt.
@@ -41,6 +44,7 @@ meshViewer/
 │   │   ├── __init__.py
 │   │   ├── connection.py      # Connection management
 │   │   ├── interface.py       # Core Meshtastic interface
+│   │   ├── data_persistence.py # Data storage and history
 │   │   └── cli.py            # CLI interface
 │   └── gui/
 │       ├── __init__.py
@@ -82,6 +86,24 @@ lsof -ti:8080 | xargs kill -9
 ```
 
 The GUI will be available at `http://localhost:8080`
+
+## Data Persistence
+
+MeshViewer automatically stores node data in the `data/` directory:
+
+- **CSV Format**: `data/node_data.csv` - Structured data for analysis
+- **JSON Format**: `data/node_data.json` - Complete node snapshots with timestamps
+
+### Battery History
+
+The Battery History tab provides:
+- Interactive charts showing voltage and battery level trends
+- Time period selection (1 hour, 6 hours, 12 hours, 1 day, 3 days, 7 days, 14 days, or 30 days)
+- Node-specific filtering
+- Statistical summaries (min/max/average values)
+- Dark/light mode support for charts
+
+Data is automatically saved every time the network is refreshed (every 5 minutes by default).
 
 ### CLI Mode
 

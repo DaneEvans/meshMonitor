@@ -1,3 +1,4 @@
 myenv/
 .venv/
 **.pyc
+data/*
