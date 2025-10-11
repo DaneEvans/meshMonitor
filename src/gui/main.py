@@ -36,6 +36,7 @@ class MeshViewerGUI:
         self.show_all_toggle = None
         self.nodes_container = None
         self.refresh_nodes_button = None
+        self.auto_refresh_timer = None
 
     def set_theme(self):
         """Set NiceGUI theme colors and mode using native theming."""
@@ -156,6 +157,8 @@ class MeshViewerGUI:
             self.connection_manager.enable_auto_refresh()
             self.connection_manager.setup_comprehensive_hooks()
             self.refresh_nodes()
+            # Start automatic refresh every 5 minutes
+            self.start_auto_refresh()
         else:
             self.connection_status.text = ui_text.get('connection_failed_tcp', 'TCP connection failed')
             self.connection_status.classes('text-red')
@@ -175,12 +178,16 @@ class MeshViewerGUI:
             self.connection_manager.enable_auto_refresh()
             self.connection_manager.setup_comprehensive_hooks()
             self.refresh_nodes()
+            # Start automatic refresh every 5 minutes
+            self.start_auto_refresh()
         else:
             self.connection_status.text = ui_text.get('connection_failed_serial', 'Serial connection failed')
             self.connection_status.classes('text-red')
     
     def disconnect(self) -> None:
         """Disconnect from the network."""
+        # Stop automatic refresh
+        self.stop_auto_refresh()
         self.connection_manager.disconnect()
         self.mesh_interface = None
         self.connected = False
@@ -258,7 +265,7 @@ class MeshViewerGUI:
         """Create a card for displaying node information."""
         ui_text = self.config.get_ui_text().get('nodes', {})
         
-        with ui.card().classes('w-full mb-2'):
+        with ui.card().classes('w-full mb-1 py-1'):
             bg_color, font_color = self.get_nodechip_colour(node_id)
             label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
 
@@ -296,6 +303,19 @@ class MeshViewerGUI:
         # Reset node count display
         if hasattr(self, 'node_count_label'):
             self.node_count_label.update()
+    
+    def start_auto_refresh(self) -> None:
+        """Start automatic refresh every 5 minutes."""
+        if self.auto_refresh_timer is None:
+            self.auto_refresh_timer = ui.timer(300.0, self.refresh_nodes)  # 300 seconds = 5 minutes
+            print("Auto-refresh started: refreshing every 5 minutes")
+    
+    def stop_auto_refresh(self) -> None:
+        """Stop automatic refresh."""
+        if self.auto_refresh_timer is not None:
+            self.auto_refresh_timer.deactivate()
+            self.auto_refresh_timer = None
+            print("Auto-refresh stopped")
     
     def run(self, **kwargs) -> None:
         """Run the GUI application."""

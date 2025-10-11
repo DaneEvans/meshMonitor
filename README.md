@@ -17,12 +17,16 @@ GUI, nicely formatted table / tabs, with health of all of your favourited nodes 
 Mostly it exists to ensure that your managed nodes are up, have decent battery levels, etc. 
 
 ## Todo:
-- [ ] add GUI
+- [x] add GUI
+- [x] auto refresh 
+- [ ] auto connect
+- [ ] 
 - [ ] add history (db or whatever)
 - [ ] add plots to show last week? of data
 - [ ] add warnings / alerts
-- [ ] look at bt / network interfaces
-- [ ] look at running it on cloud, or sourcing data from mqtt. 
+- [x] look at bt / network interfaces
+- [ ] look at running it on cloud, or sourcing data from mqtt.
+ 
 
 ## Project Structure
 
