@@ -1,182 +1,48 @@
-# MeshViewer
+# MeshMonitor
 
-A Meshtastic network monitoring application with both GUI and CLI interfaces.
+[MeshMonitor](https://daneevans.github.io/meshMonitor/) is a comprehensive Meshtastic network monitoring application with both GUI and CLI interfaces for monitoring your mesh network nodes.
+
+## Quick Start
+
+1. **Clone and install:**
+   ```bash
+   git clone https://github.com/daneevans/meshViewer.git
+   cd meshViewer
+   python3 -m venv .venv
+   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+2. **Run the application:**
+   ```bash
+   python main.py
+   ```
+
+3. **Open your browser to:** `http://localhost:8080`
 
 ## Features
 
-- **GUI Interface**: Modern web-based interface using NiceGUI
-- **CLI Interface**: Command-line monitoring for terminal-based workflows
-- **Multiple Connection Types**: Support for both TCP and Serial connections
-- **Real-time Monitoring**: Live updates of network node status
-- **Battery Monitoring**: Track battery levels and charging status
-- **Uptime Tracking**: Monitor node uptime and network health
-- **Data Persistence**: Automatic storage of node metrics to CSV/JSON files
-- **Battery History**: Interactive charts showing battery voltage trends over time
-- **Historical Analysis**: View battery data for the last 1-30 days
+- 🌐 **Web Interface**: Modern responsive UI with real-time monitoring
+- 📊 **Battery History**: Interactive charts showing voltage trends over time
+- 🔔 **Smart Alerts**: Audio and visual notifications for low battery
+- 💾 **Data Persistence**: Automatic CSV/JSON logging with intelligent filtering
+- 🖥️ **CLI Interface**: Terminal-based monitoring for automation
+- 🔌 **Multiple Connections**: TCP and Serial support with auto-fallback
+- 🎨 **Customizable**: Themes, colors, and UI text via config.yaml
 
-## Plans 
-Laptop hosted - unless I can port to an app as well? 
-GUI, nicely formatted table / tabs, with health of all of your favourited nodes (ie. ones you admin)
-Mostly it exists to ensure that your managed nodes are up, have decent battery levels, etc. 
+## Documentation
 
-## Todo:
-- [x] add GUI
-- [x] auto refresh 
-- [x] auto connect
-- [ ] make concerning numbers easier to see
- - [x] move to getting values, and do string conversion in gui
- - [x] add colours. 
-- [x] add history (db or whatever)
-- [x] add plots to show last week? of data
-- [x] add warnings / alerts
-- [x] look at bt / network interfaces
-- [ ] look at running it on cloud, or sourcing data from mqtt.
- 
+📖 **[Full Documentation](https://daneevans.github.io/meshMonitor/)** - Complete user guide, configuration, and API reference
 
-## Project Structure
+- [Installation & Setup](https://daneevans.github.io/meshMonitor/setup)
+- [CLI Reference](https://daneevans.github.io/meshMonitor/cli)
+- [Configuration Guide](https://daneevans.github.io/meshMonitor/configuration)
 
-```text
-meshViewer/
-├── src/
-│   ├── __init__.py
-│   ├── meshviewer/
-│   │   ├── __init__.py
-│   │   ├── connection.py      # Connection management
-│   │   ├── interface.py       # Core Meshtastic interface
-│   │   ├── data_persistence.py # Data storage and history
-│   │   └── cli.py            # CLI interface
-│   └── gui/
-│       ├── __init__.py
-│       └── main.py           # GUI interface
-├── main.py                   # Main entry point (GUI)
-├── setup.py                  # Package setup configuration
-├── requirements.txt          # Dependencies
-└── README.md
-```
+## Requirements
 
-## Installation
-
-1. Clone the repository:
-
-```bash
-git clone <repository-url>
-cd meshViewer
-```
-
-2. Install dependencies:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -r requirements.txt
-```
-
-## Usage
-
-### GUI Mode (Default)
-You can provide a custom configuration file with the `--config` argument. 
-For example, to use a different YAML config file:
-
-```bash
-python main.py --config path/to/your_config.yaml
-```
-
-You may also adjust the host, port, or disable automatic browser opening:
-
-```bash
-python main.py --config path/to/your_config.yaml --host 127.0.0.1 --port 8081 --no-browser
-```
-
-If `--config` is not specified, MeshViewer uses `config.yaml` in the root directory by default.
-
-The example `config.yaml` file is included and can be edited to customize app details, theme colors, labels, or default connection settings.
-
-
-
-Run the web-based interface:
-
-```bash
-python main.py
-
-# if it gets locked up, and you get an Address already in use message use 
-lsof -ti:8080 | xargs kill -9
-```
-
-The GUI will be available at `http://localhost:8080`
-
-## Data Persistence
-
-MeshViewer automatically stores node data in the `data/` directory:
-
-- **CSV Format**: `data/node_data.csv` - Structured data for analysis
-- **JSON Format**: `data/node_data.json` - Complete node snapshots with timestamps
-
-### Battery History
-
-The Battery History tab provides:
-- Interactive charts showing voltage and battery level trends
-- Time period selection (1 hour, 6 hours, 12 hours, 1 day, 3 days, 7 days, 14 days, or 30 days)
-- Node-specific filtering
-- Statistical summaries (min/max/average values)
-- Dark/light mode support for charts
-
-Data is automatically saved every time the network is refreshed (every 5 minutes by default).
-
-### CLI Mode
-
-Run the command-line interface:
-
-```bash
-python -m src.meshviewer.cli --mode continuous --interval 30
-python -m src.meshviewer.cli --mode continuous --interval 60 --full-refresh-interval 180 
-# the full refresh is needed for new data - unless it comes from a 'text message'
-# this seems to be a library issue ... 
-# better to just disconnect and reconnect I suspect.
-
-```
-yep , know issue. https://discord.com/channels/867578229534359593/871553765105348668/1393628595754107120
-
-
-#### CLI Options
-
-- `--mode`: Display mode (`oneshot` or `continuous`)
-- `--interval`: Refresh interval for continuous mode (seconds)
-- `--tcp-host`: TCP host for connection (default: 192.168.0.114)
-- `--tcp-port`: TCP port for connection (default: 4403)
-- `--serial-port`: Serial port for connection (optional)
-
-## Configuration
-
-### TCP Connection
-
-- Default host: `192.168.0.114`
-- Default port: `4403`
-
-### Serial Connection
-
-- Auto-detect available ports
-- Specify port manually if needed
-
-## Development
-
-The project is structured with clear separation of concerns:
-
-- **`src/meshviewer/`**: Core Meshtastic functionality
-  - `connection.py`: Handles network connections
-  - `interface.py`: Node data processing and formatting
-  - `cli.py`: Command-line interface
-
-- **`src/gui/`**: GUI components
-  - `main.py`: Web-based interface using NiceGUI
-
-- **`main.py`**: Application entry point
-
-## Dependencies
-
-- `meshtastic`: Meshtastic Python library
-- `nicegui`: Modern web UI framework
-- `pyserial`: Serial communication
-- `protobuf`: Protocol buffer support
+- Python 3.8+
+- Meshtastic device via serial or network access
+- Modern web browser (for GUI)
 
 ## License
 

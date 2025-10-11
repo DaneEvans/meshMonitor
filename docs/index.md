@@ -1,4 +1,4 @@
-# Mesh Monitor
+# MeshMonitor
 
 MeshMonitor is a comprehensive Meshtastic network monitoring application designed to give you an 'at a glance' overview of your mesh network, with particular focus on nodes that you administer.
 
@@ -31,17 +31,16 @@ It is built using NiceGUI for the web interface and the [Meshtastic](https://mes
 MeshViewer can be run from a Raspberry Pi Zero, desktop computer, or any system with Python support. It communicates with nodes via either serial or TCP connections and is designed for continuous operation to provide comprehensive logging and analysis of mesh network health.
 
 
-## Running 
-
-The app is designed to be run on a RPi Zero, desktop computer, or any system with Python support.
+## Getting Started
 
 ### Quick Start
-1. Clone this repository
-2. Follow the installation instructions in [README.md](README.md)
-3. Run the GUI: `python main.py`
-4. Open your browser to `http://localhost:8080`
+1. [Install MeshMonitor](setup.md) - Complete installation guide
+2. Run the application: `python main.py`
+3. Open your browser to `http://localhost:8080`
 
-### GUI Mode (Default)
+### Usage Examples
+
+#### GUI Mode (Default)
 ```bash
 # Basic usage
 python main.py
@@ -53,7 +52,7 @@ python main.py --config path/to/your_config.yaml
 python main.py --host 127.0.0.1 --port 8081 --no-browser
 ```
 
-### CLI Mode
+#### CLI Mode
 ```bash
 # One-shot status report
 python -m src.meshviewer.cli --mode oneshot
@@ -65,50 +64,38 @@ python -m src.meshviewer.cli --mode continuous --interval 30
 python -m src.meshviewer.cli --tcp-host 192.168.1.100 --tcp-port 4403
 ```
 
-### Default Connection Settings
+### Default Settings
 - **TCP Host**: `192.168.0.135` (configurable)
 - **TCP Port**: `4403`
 - **Web Interface**: `http://localhost:8080`
 
 **Security Note**: This application is designed for hobbyist use on trusted networks. It is not intended for production or public-facing deployments.
 
+## Documentation
 
+### 📖 [Installation & Setup](setup.md)
+Complete installation guide including system requirements, troubleshooting, and first-time setup.
 
-## Configuring
+### ⚙️ [Configuration Guide](configuration.md)
+Detailed configuration options for themes, UI text, connection settings, and customization.
 
-Much of the application is configurable through the `config.yaml` file, including:
+### 🖥️ [CLI Reference](cli.md)
+Command-line interface documentation with all options and usage examples.
 
-- **Theme Settings**: Colors, dark/light mode preferences
-- **UI Text**: Customizable labels and messages
-- **Connection Settings**: Default TCP host/port
-- **Node Settings**: Active threshold hours for node activity detection
-- **Battery Thresholds**: Alert levels for low battery warnings
+## Data Management
 
-The default configuration is located in `config.yaml` in the root directory. You can modify this file directly or provide an alternative configuration using the `--config` parameter.
-
-### Configuration Options
-- **App Settings**: Title, subtitle, logo path
-- **Theme Colors**: Primary, secondary, accent, positive, negative colors
-- **UI Text**: All user-facing text labels and messages
-- **Connection Defaults**: TCP host (`192.168.0.135`) and port (`4403`)
-- **Node Activity**: Threshold for considering nodes "active" (default: 3 hours)
-
-## CLI Interface
-
-The command-line interface provides comprehensive monitoring capabilities with both one-shot and continuous modes. Unlike the GUI, the CLI does not include data persistence directly, but output can be piped to log files for external processing.
-
-[CLI API Documentation](./cli.md)
-
-## Data Storage
-
-MeshViewer automatically stores node data in the `data/` directory:
+### Automatic Storage
+MeshMonitor automatically stores node data in the `data/` directory:
 - **CSV Format**: `data/node_data.csv` - Structured data for analysis
 - **JSON Format**: `data/node_data.json` - Complete node snapshots with timestamps
 
-Data is saved every 5 minutes during normal operation, with intelligent filtering to only store nodes that have changed their uptime (indicating active status).
+### Data Features
+- **Intelligent Filtering**: Only logs active nodes
+- **Historical Analysis**: Battery voltage trends and statistical summaries
+- **Data Export**: CSV format for external analysis
+- **Backup Support**: Manual backup and restore capabilities
 
-### Backup and restoring data
-
+### Data Backup
 You can manually back up or restore the data storage files, or transfer them between machines as needed. This allows for long-term network logging. Please note that you are responsible for your own data management and backups.
 
 Currently, there are no built-in limits on log file size. If you are monitoring a large network or have limited storage capacity, it is recommended to set up a cron job or similar process to periodically clean up or archive the log files.
