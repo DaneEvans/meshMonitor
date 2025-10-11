@@ -6,12 +6,14 @@ from typing import Optional, Dict, Any
 from meshviewer.connection import MeshConnectionManager
 from meshviewer.interface import MeshInterface
 from meshviewer.config import ConfigManager
+import time
 
 
 class MeshViewerGUI:
     """Main GUI class for the MeshViewer application."""
     # active_threshold is now set from config in __init__
-    
+    dark = ui.dark_mode()
+
     def __init__(self, config_path: Optional[str] = None):
         """Initialize the GUI."""
         self.config = ConfigManager(config_path)
@@ -61,9 +63,8 @@ class MeshViewerGUI:
             ui.label(self.config.get('app.title', 'MeshViewer')).classes('text-h4')
             ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
         
-        dark = ui.dark_mode()
-        dark.enable()
-        ui.switch('Dark mode').bind_value(dark)
+        self.dark.enable()
+        ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
 
         # Responsive layout: on small screens, connection panel on top; on large screens, nodes panel on left
         with ui.row().classes('w-full flex-col md:flex-row gap-4'):
@@ -97,7 +98,7 @@ class MeshViewerGUI:
                 def try_connect_once():
                     if not getattr(self, 'connected', False):
                         self.connect_tcp()
-                ui.timer(2.0, try_connect_once, once=True)
+                ui.timer(0.5, try_connect_once, once=True)
 
             
             with ui.row().classes('w-full'):
@@ -282,17 +283,16 @@ class MeshViewerGUI:
                             ui.label(node['user']['longName']).classes('text-h6')
                         with ui.row().classes('items-right'):
                             if 'deviceMetrics' in node:
-                                battery_info = self.mesh_interface.get_battery_levels(node)
-                                last_heard_info = self.mesh_interface.get_last_heard_string(node)
-                                ui.label(battery_info).classes('text-sm')
-                                ui.label(last_heard_info).classes('text-sm')
+                                self.render_last_heard(node)
+                                self.render_battery_string(node)
+
 
                 # The expansion content is the detailed view
                 with ui.row().classes('w-full items-center justify-between'):
                     if 'deviceMetrics' in node:
-                        uptime_info = self.mesh_interface.get_uptime_string(node)
-                        ui.label(uptime_info).classes('text-sm')
-                        channel_util = node['deviceMetrics']['channelUtilization'] * 100
+                        uptime_hours = self.mesh_interface.get_uptime(node, asString = False)
+                        ui.label(f"up {uptime_hours:4.1f} hrs").classes('text-sm')
+                        channel_util = node['deviceMetrics']['channelUtilization']
                         ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption')
                     ui.label(f"{ui_text.get('hw_label', 'HW')}: {node['user']['hwModel']}").classes('text-caption')
                     ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption')
@@ -307,6 +307,66 @@ class MeshViewerGUI:
         # Reset node count display
         if hasattr(self, 'node_count_label'):
             self.node_count_label.update()
+
+    def render_battery_string(self, node):
+        battery_level, voltage, is_charging = self.mesh_interface.get_node_battery_status(node, asString = False)
+        if is_charging:
+            bat_str = " Chg"
+        else:
+            bat_str = f"{battery_level:3}%"
+        bat_str += f", {voltage:.3f}V "
+        
+        if self.dark.value:
+            # When dark mode is on
+            if is_charging:
+                bat_color = "#82d0fa"
+            elif battery_level < 60:
+                bat_color = "#C10015"  # red for low battery
+            else:
+                bat_color = "#21ba45"
+
+            voltage_color = "#bbbbbb"
+
+        else:
+            # Light mode
+            if is_charging:
+                bat_color = "#1565c0"  # deeper blue, higher saturation
+            elif battery_level < 60:
+                bat_color = "#C10015"  # red
+            else:
+                bat_color = "#1b8d2b"  # more saturated green for better contrast
+
+            voltage_color = "#666666"
+
+
+        return ui.html(
+            f'<span class="text-sm">'
+            f'<span style="color: {bat_color}; font-weight: bold;">{bat_str[:4]}</span>'
+            f'<span style="color: {voltage_color};">{bat_str[4:]}</span>'
+            f'</span>'
+        )
+
+    def render_last_heard(self, node):
+        last_heard = self.mesh_interface.get_last_heard(node, asString = False);
+        now = int(time.time())
+        delta = now - last_heard
+        if delta > 6 * 3600:
+            last_heard_str = time.strftime("%H:%M %d/%m/%Y", time.localtime(last_heard))
+        else:
+            last_heard_str = time.strftime("%H:%M", time.localtime(last_heard))
+        # Use HTML for last heard display with color based on time delta: >1h (yellow), >3h (orange), >6h (red)
+        if delta > 6 * 3600:
+            color = "#c0392b"  # red
+        elif delta > 3 * 3600:
+            color = "#e67e22"  # orange
+        elif delta > 1 * 3600:
+            color = "#ffe04b"  # yellow
+        else:
+            color = "#bbbbbb" if self.dark.value else "#444444"
+        ui.html(
+            f'<span class="text-sm" style="color:{color};">Last Heard:<br>{last_heard_str}</span>'
+        )
+
     
     def start_auto_refresh(self) -> None:
         """Start automatic refresh every 5 minutes."""

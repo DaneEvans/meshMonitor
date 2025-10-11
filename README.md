@@ -19,7 +19,10 @@ Mostly it exists to ensure that your managed nodes are up, have decent battery l
 ## Todo:
 - [x] add GUI
 - [x] auto refresh 
-- [ ] auto connect
+- [x] auto connect
+- [ ] make concerning numbers easier to see
+ - [x] move to getting values, and do string conversion in gui
+ - [x] add colours. 
 - [ ] 
 - [ ] add history (db or whatever)
 - [ ] add plots to show last week? of data

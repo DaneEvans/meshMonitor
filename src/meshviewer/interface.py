@@ -18,62 +18,69 @@ class MeshInterface:
         self.interface = interface
         self.last_heard_cache = {}  # Cache to track lastHeard changes
 
-    def get_uptime_string(self, node: Dict[str, Any]) -> str:
+    def get_uptime(self, node: Dict[str, Any], asString: bool = True) -> Any:
         """
-        Get formatted uptime string for a node.
-        
+        Get uptime in hours for a node.
+
         Args:
             node: Node data dictionary
-            
+            asString (bool, optional): If True, return formatted string. If False, return uptime as float.
+
         Returns:
-            Formatted uptime string
+            float or str: Uptime in hours (float) or as a formatted string if asString is True.
         """
         uptime_hours = node['deviceMetrics']['uptimeSeconds'] / 3600
-        return f"up {uptime_hours:4.1f} hrs"
-
-    def get_last_heard_delta_string(self, node: Dict[str, Any]) -> str:
-        """
-        Get formatted uptime string for a node.
         
+        return f"up {uptime_hours:4.1f} hrs" if asString else uptime_hours
+
+
+    def get_last_heard_delta(self, node: Dict[str, Any], asString: bool = True) -> Any:
+        """
+        Get time delta in seconds since node was last heard.
+
         Args:
             node: Node data dictionary
-            
+            asString (bool, optional): If True, return formatted string. If False, return delta as int (seconds).
+
         Returns:
-            Formatted uptime string
+            int or str: Delta in seconds (int) or formatted string if asString is True.
         """
-        lastHeard = node['lastHeard']
-        # Convert lastHeard (epoch seconds) to "time ago" string (hh:mm:ss)
+        lastHeard = node.get('lastHeard', 0)
         now = int(time.time())
         delta = now - lastHeard
         if delta < 0:
-            # Future time, just show 0
             delta = 0
-        hours = delta // 3600
-        minutes = (delta % 3600) // 60
-        seconds = delta % 60
-        timeAgo = f"{hours:02}:{minutes:02}:{seconds:02}"
-        return f"last heard T-{timeAgo} Ago"
+        if asString:
+            hours = delta // 3600
+            minutes = (delta % 3600) // 60
+            seconds = delta % 60
+            timeAgo = f"{hours:02}:{minutes:02}:{seconds:02}"
+            return f"last heard T-{timeAgo} Ago"
+        else:
+            return delta
 
-    def get_last_heard_string(self, node: Dict[str, Any]) -> str:
+    def get_last_heard(self, node: Dict[str, Any], asString: bool = True) -> Any:
         """
-        Get the timestamp string for when the node was last heard.
+        Get the timestamp string for when the node was last heard, or the raw lastHeard value.
 
         Args:
             node: Node data dictionary
+            asString (bool, optional): If True, return formatted string. If False, return raw lastHeard value.
 
         Returns:
-            Formatted last heard timestamp string
+            str or int: Formatted last heard timestamp string or raw lastHeard epoch time.
         """
         lastHeard = node.get('lastHeard', 0)
-        # Convert lastHeard (epoch seconds) to human-readable time
-        now = int(time.time())
-        delta = now - lastHeard
-        
-        if delta > 6 * 3600:
-            last_heard_str = time.strftime("%H:%M %d/%m/%Y", time.localtime(lastHeard))
+        if asString:
+            now = int(time.time())
+            delta = now - lastHeard
+            if delta > 6 * 3600:
+                last_heard_str = time.strftime("%H:%M %d/%m/%Y", time.localtime(lastHeard))
+            else:
+                last_heard_str = time.strftime("%H:%M", time.localtime(lastHeard))
+            return f"RX'd {last_heard_str}"
         else:
-            last_heard_str = time.strftime("%H:%M", time.localtime(lastHeard))
-        return f"RX'd {last_heard_str}"
+            return lastHeard
 
     def get_single_node_dump(self):
         node_ids = list(self.interface.nodes.keys())
@@ -91,28 +98,32 @@ class MeshInterface:
         return(node)        
 
 
-    def get_battery_levels(self, node: Dict[str, Any]) -> str:
+    def get_node_battery_status(self, node: Dict[str, Any], asString: bool = True) -> Any:
         """
-        Get formatted battery information for a node.
-        
+        Get battery information for a node, either formatted as a string or as the raw data.
+
         Args:
             node: Node data dictionary
-            
-        Returns:
-            Formatted battery string
-        """
-        is_charging = node['deviceMetrics']['batteryLevel'] == 101
-        out_str = ""
-        
-        if is_charging:
-            out_str += " Chg"
-        else:
-            out_str += f"{node['deviceMetrics']['batteryLevel']:3}%"
-        
-        out_str += f", {node['deviceMetrics']['voltage']:.3f}V "
-        return out_str
+            asString (bool, optional): If True, return formatted string. If False, return (battery_level, voltage, is_charging) tuple.
 
-    def get_battery_string(self, whole_mesh: bool = False) -> None:
+        Returns:
+            str or tuple: Formatted battery string or (battery_level, voltage, is_charging) tuple
+        """
+        battery_level = node['deviceMetrics']['batteryLevel']
+        voltage = node['deviceMetrics']['voltage']
+        is_charging = battery_level == 101
+
+        if asString:
+            if is_charging:
+                out_str = " Chg"
+            else:
+                out_str = f"{battery_level:3}%"
+            out_str += f", {voltage:.3f}V "
+            return out_str
+        else:
+            return battery_level, voltage, is_charging
+
+    def print_mesh_metrics(self, whole_mesh: bool = False) -> None:
         """
         Print battery information for nodes.
         
@@ -124,9 +135,9 @@ class MeshInterface:
             node_keys = node.keys()
             
             if whole_mesh and "deviceMetrics" in node_keys:
-                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_battery_levels(node)} : {self.get_last_heard_string(node)} - {self.get_uptime_string(node)}")
+                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_node_battery_status(node)} : {self.get_last_heard(node)} - {self.get_uptime(node)}")
             elif "isFavorite" in node_keys:
-                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_battery_levels(node)} : {self.get_last_heard_string(node)} - {self.get_uptime_string(node)}")
+                print(f"{node_id}  {node['user']['longName']:25} - {node['user']['hwModel']:21} : {self.get_node_battery_status(node)} : {self.get_last_heard(node)} - {self.get_uptime(node)}")
 
     def find_non_favorites_string(self) -> None:
         """Print nodes that are not marked as favorites."""

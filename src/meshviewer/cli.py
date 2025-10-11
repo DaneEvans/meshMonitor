@@ -15,7 +15,7 @@ def text_oneshot(mesh_interface: MeshInterface, debug=False) -> None:
         mesh_interface: MeshInterface instance
     """
     print("=== Meshtastic Network Status ===")
-    mesh_interface.get_battery_string(whole_mesh=True)
+    mesh_interface.print_mesh_metrics(whole_mesh=True)
     print()
 
     if debug:
@@ -47,7 +47,7 @@ def continuous_text(mesh_interface: MeshInterface, connection_manager, interval:
             mesh_interface.detect_last_heard_changes()
             # Force update of last heard timestamps
             mesh_interface.force_last_heard_update()
-            mesh_interface.get_battery_string(whole_mesh=True)
+            mesh_interface.print_mesh_metrics(whole_mesh=True)
             print()
             time.sleep(interval)
     except KeyboardInterrupt:
