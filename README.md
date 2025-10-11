@@ -8,10 +8,10 @@
 MeshMonitor using in default configuration
 
 **Front Page**
-![MeshMonitor Desktop Front Page](desktop_frontpage_default.png)
+![MeshMonitor Desktop Front Page](../docs/screenshots/desktop_frontpage_default.png)
 
 **Graph View**
-![MeshMonitor Desktop Graph View](desktop_graph_default.png)
+![MeshMonitor Desktop Graph View](../docs/screenshots/desktop_graph_default.png)
 
 ## Quick Start
 

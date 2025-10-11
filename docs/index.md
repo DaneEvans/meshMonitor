@@ -20,12 +20,12 @@ It is built using NiceGUI for the web interface and the [Meshtastic](https://mes
 #### Screenshots 
 
 **Front Page**
-![MeshMonitor Desktop Front Page](desktop_frontpage_default.png)
-![MeshMonitor Desktop Front Page](mobile_frontpage_default.png)
+![MeshMonitor Desktop Front Page](./screenshots/desktop_frontpage_default.png)
+![MeshMonitor Desktop Front Page](./screenshots/mobile_frontpage_default.png)
 
 **Graph View**
-![MeshMonitor Desktop Graph View](desktop_graph_default.png)
-![MeshMonitor Desktop Graph View](mobile_graph_default.png)
+![MeshMonitor Desktop Graph View](./screenshots/desktop_graph_default.png)
+![MeshMonitor Desktop Graph View](./screenshots/mobile_graph_default.png)
 
 
 ### Command Line Interface (CLI)
