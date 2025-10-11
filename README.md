@@ -75,6 +75,24 @@ python3 -m pip install -r requirements.txt
 ## Usage
 
 ### GUI Mode (Default)
+You can provide a custom configuration file with the `--config` argument. 
+For example, to use a different YAML config file:
+
+```bash
+python main.py --config path/to/your_config.yaml
+```
+
+You may also adjust the host, port, or disable automatic browser opening:
+
+```bash
+python main.py --config path/to/your_config.yaml --host 127.0.0.1 --port 8081 --no-browser
+```
+
+If `--config` is not specified, MeshViewer uses `config.yaml` in the root directory by default.
+
+The example `config.yaml` file is included and can be edited to customize app details, theme colors, labels, or default connection settings.
+
+
 
 Run the web-based interface:
 

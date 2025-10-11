@@ -62,13 +62,17 @@ class MeshViewerGUI:
 
     def setup_ui(self) -> None:
         """Setup the main UI components."""
-        ui.page_title(self.config.get('app.page_title', 'MeshViewer - Meshtastic Network Monitor'))
+        ui.page_title(self.config.get('app.page_title', 'Mesh Monitor - Meshtastic Network Monitor'))
         
         with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
             logo_path = self.config.get('app.logo_path')
             ui.image(logo_path).style('max-width: 10vw; height: auto;')
-            ui.label(self.config.get('app.title', 'MeshViewer')).classes('text-h4')
-            ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+            with ui.column().classes('items-center'):
+                ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
+                ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+            with ui.column().classes('items-right'):
+                ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
+                ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
         
         self.dark.enable()
         ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
