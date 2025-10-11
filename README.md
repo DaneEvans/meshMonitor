@@ -26,7 +26,6 @@ Mostly it exists to ensure that your managed nodes are up, have decent battery l
 - [ ] make concerning numbers easier to see
  - [x] move to getting values, and do string conversion in gui
  - [x] add colours. 
-- [ ] 
 - [x] add history (db or whatever)
 - [x] add plots to show last week? of data
 - [x] add warnings / alerts
