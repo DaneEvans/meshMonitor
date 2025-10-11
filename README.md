@@ -26,7 +26,7 @@ Mostly it exists to ensure that your managed nodes are up, have decent battery l
 - [ ] 
 - [ ] add history (db or whatever)
 - [ ] add plots to show last week? of data
-- [ ] add warnings / alerts
+- [x] add warnings / alerts
 - [x] look at bt / network interfaces
 - [ ] look at running it on cloud, or sourcing data from mqtt.
  
