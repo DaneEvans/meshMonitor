@@ -136,3 +136,10 @@ MeshMonitor creates a `data/` directory for storing:
 - [Configuration Guide](configuration.md) - Customize themes, settings, and behavior
 - [CLI Reference](cli.md) - Command-line interface documentation
 - [Main Documentation](index.md) - Complete feature overview
+
+
+### Autorun on the pi. 
+
+https://www.dexterindustries.com/howto/run-a-program-on-your-raspberry-pi-at-startup/
+
+using /home/dane/.bashrc

@@ -2,6 +2,17 @@
 
 [MeshMonitor](https://daneevans.github.io/meshMonitor/) is a comprehensive Meshtastic network monitoring application with both GUI and CLI interfaces for monitoring your mesh network nodes.
 
+
+## Screenshots
+
+MeshMonitor using in default configuration
+
+**Front Page**
+![MeshMonitor Desktop Front Page](desktop_frontpage_default.png)
+
+**Graph View**
+![MeshMonitor Desktop Graph View](desktop_graph_default.png)
+
 ## Quick Start
 
 1. **Clone and install:**
@@ -16,6 +27,9 @@
 2. **Run the application:**
    ```bash
    python main.py
+
+   # run from ssh - no hangup 
+   nohup python main.py &
    ```
 
 3. **Open your browser to:** `http://localhost:8080`

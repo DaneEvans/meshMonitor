@@ -17,6 +17,17 @@ It is built using NiceGUI for the web interface and the [Meshtastic](https://mes
 - **Responsive Design**: Works on mobile, tablet, and desktop
 - **Data Persistence**: Automatic storage of node metrics to CSV/JSON files
 
+#### Screenshots 
+
+**Front Page**
+![MeshMonitor Desktop Front Page](desktop_frontpage_default.png)
+![MeshMonitor Desktop Front Page](mobile_frontpage_default.png)
+
+**Graph View**
+![MeshMonitor Desktop Graph View](desktop_graph_default.png)
+![MeshMonitor Desktop Graph View](mobile_graph_default.png)
+
+
 ### Command Line Interface (CLI)
 - **One-shot Mode**: Single status report and exit
 - **Continuous Mode**: Real-time monitoring with configurable refresh intervals
