@@ -93,7 +93,11 @@ class MeshViewerGUI:
                     max=9999,
                     step=1
                 ).classes('w-1/6 min-w-0').props('maxlength=4')
-                ui.button('Connect TCP', on_click=self.connect_tcp).classes('w-1/4')
+                self.connect_tcp_button = ui.button('Connect TCP', on_click=self.connect_tcp).classes('w-1/4')
+                def try_connect_once():
+                    if not getattr(self, 'connected', False):
+                        self.connect_tcp()
+                ui.timer(2.0, try_connect_once, once=True)
 
             
             with ui.row().classes('w-full'):
