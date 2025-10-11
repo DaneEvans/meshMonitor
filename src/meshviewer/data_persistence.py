@@ -29,6 +29,12 @@ class DataPersistence:
         
         # Initialize CSV file with headers if it doesn't exist
         self._initialize_csv()
+        
+        # Track previous uptime values to detect changes
+        self._previous_uptimes = {}
+        
+        # Load previous uptime values from existing data
+        self._load_previous_uptimes()
     
     def _initialize_csv(self) -> None:
         """Initialize CSV file with headers if it doesn't exist."""
@@ -41,6 +47,24 @@ class DataPersistence:
             with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
+    
+    def _load_previous_uptimes(self) -> None:
+        """Load the most recent uptime values for each node from existing data."""
+        if not os.path.exists(self.csv_file):
+            return
+        
+        try:
+            df = pd.read_csv(self.csv_file)
+            if df.empty:
+                return
+            
+            # Get the most recent uptime for each node
+            latest_data = df.groupby('node_id')['uptime_hours'].last()
+            self._previous_uptimes = latest_data.to_dict()
+            
+        except Exception as e:
+            print(f"Warning: Could not load previous uptime values: {e}")
+            self._previous_uptimes = {}
     
     def save_nodes_data(self, nodes_data: Dict[str, Dict[str, Any]]) -> None:
         """
@@ -84,13 +108,25 @@ class DataPersistence:
             if 'deviceMetrics' not in node:
                 continue
                 
-            # Extract battery information
+            # Extract uptime and check if it has changed
+            uptime_hours = node['deviceMetrics'].get('uptimeSeconds', 0) / 3600
+            previous_uptime = self._previous_uptimes.get(node_id, 0)
+            
+            print(f"watchme: {uptime_hours}, {previous_uptime}")
+            # Skip nodes that haven't changed their uptime (indicating they haven't updated telemetry.
+            # Allow small float precision differences and optionally a force-write override in the future
+            uptime_diff = abs(float(uptime_hours) - float(previous_uptime))
+            # Consider uptime the "same" if the change is less than 0.01 hour (36 seconds)
+            if uptime_diff < 0.01:
+                print(f'skipping writing to db for node {node_id} (uptime difference {uptime_diff:.4f} < 0.0001)')
+                continue
+            else:
+                print(f' writing to db for node {node_id} (uptime difference {uptime_diff:.4f} >= 0.0001)')            # Extract battery information
             battery_level = node['deviceMetrics'].get('batteryLevel', 0)
             voltage = node['deviceMetrics'].get('voltage', 0.0)
             is_charging = battery_level == 101
             
             # Extract other metrics
-            uptime_hours = node['deviceMetrics'].get('uptimeSeconds', 0) / 3600
             channel_util = node['deviceMetrics'].get('channelUtilization', 0.0)
             last_heard = node.get('lastHeard', 0)
             
@@ -137,6 +173,12 @@ class DataPersistence:
         # Write to JSON (append to file with timestamp)
         with open(self.json_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(json_data) + '\n')
+        
+        # Update the previous uptime tracking for saved nodes
+        for node_id, node in nodes_data.items():
+            if 'deviceMetrics' in node:
+                uptime_hours = node['deviceMetrics'].get('uptimeSeconds', 0) / 3600
+                self._previous_uptimes[node_id] = uptime_hours
         
         print(f"Saved data for {len(csv_rows)} nodes at {timestamp_str}")
     

@@ -481,8 +481,30 @@ class MeshViewerGUI:
             # Update node selector options
             if not df.empty:
                 unique_nodes = df['node_id'].unique()
-                node_options = {node_id: f"{df[df['node_id'] == node_id].iloc[0]['short_name']} ({node_id[-6:]})" 
-                              for node_id in unique_nodes}
+                node_options = {}
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                week_ago = now - timedelta(days=7)
+                for node_id in unique_nodes:
+                    node_df = df[df['node_id'] == node_id]
+                    short_name = node_df.iloc[0]['short_name']
+                    # Filter for last 7 days for this node
+                    node_week = node_df[node_df['timestamp'] >= week_ago]
+                    if not node_week.empty:
+                        min_week_volt = node_week['voltage'].min()
+                        min_week_batt = node_week['battery_level'].min()
+                        # Determine color class based on thresholds
+                        if min_week_batt < 30:
+                            symbol = "🔴"  # Red circle
+                        elif min_week_batt < 60:
+                            symbol = "🟡"  # Yellow circle
+                        else:
+                            symbol = "🟢"  # Green circle
+                        # Use Unicode symbols for battery percent
+                        label = f"{short_name} (!{node_id[-8:]}) - Battery Low (7d): {min_week_batt:.0f}% {symbol}"
+                    else:
+                        label = f"{short_name} (!{node_id[-8:]})"
+                    node_options[node_id] = label
                 self.node_selector.options = node_options
                 # Only set default if no node is currently selected
                 if not self.node_selector.value and node_options:
@@ -697,7 +719,7 @@ class MeshViewerGUI:
                 mode='markers+lines',
                 name='Voltage (V)',
                 line=dict(color='#21BA45', width=2),
-                marker=dict(size=6, color='#21BA45', line=dict(width=1, color='white')),
+                marker=dict(size=6, color='#21BA45', line=dict(width=1, color='#21BA45')),
                 connectgaps=False
             ))
             
@@ -709,21 +731,9 @@ class MeshViewerGUI:
                 name='Battery Level (%)',
                 yaxis='y2',
                 line=dict(color='#C10015', width=2),
-                marker=dict(size=6, color='#C10015', line=dict(width=1, color='white')),
+                marker=dict(size=6, color='#C10015', line=dict(width=1, color='#C10015')),
                 connectgaps=False
             ))
-
-            fig.add_trace(go.Scatter(
-                y=[0,1,1,4,52,2],
-                x=[0,1,2,3,4,5],
-                mode='markers+lines',
-                name='Battery Level (%)',
-                yaxis='y2',
-                line=dict(color='purple', width=2),
-                marker=dict(size=6, color='#C10015', line=dict(width=1, color='white')),
-                connectgaps=False
-            ))
-
             
             # Use consistent axis ranges regardless of data
             voltage_range = [3.0, 4.5]  # Fixed voltage range
@@ -765,15 +775,7 @@ class MeshViewerGUI:
                     x=1
                 )
             )
-            
-            # Debug: Print figure data
-            print(f"DEBUG: Figure has {len(fig.data)} traces")
-            for i, trace in enumerate(fig.data):
-                print(f"DEBUG: Trace {i}: {trace.name}, {len(trace.x)} x points, {len(trace.y)} y points")
-                if len(trace.x) > 0:
-                    print(f"DEBUG: Trace {i} x range: {min(trace.x)} to {max(trace.x)}")
-                    print(f"DEBUG: Trace {i} y range: {min(trace.y):.3f} to {max(trace.y):.3f}")
-            
+                        
             # Display chart
             with self.battery_chart_container:
                 # Always create a new chart to ensure it updates
