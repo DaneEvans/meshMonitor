@@ -54,7 +54,7 @@ class MeshViewerGUI:
         """Setup the main UI components."""
         ui.page_title(self.config.get('app.page_title', 'MeshViewer - Meshtastic Network Monitor'))
         
-        with ui.header().classes('items-center justify-between'):
+        with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
             logo_path = self.config.get('app.logo_path')
             ui.image(logo_path).style('max-width: 10vw; height: auto;')
             ui.label(self.config.get('app.title', 'MeshViewer')).classes('text-h4')
@@ -152,6 +152,9 @@ class MeshViewerGUI:
             self.connected = True
             self.connection_status.text = ui_text.get('connected_tcp_status', 'Connected via TCP to {host}:{port}').format(host=host, port=port)
             self.connection_status.classes('text-green')
+            # Set up comprehensive hooks to catch all packet types
+            self.connection_manager.enable_auto_refresh()
+            self.connection_manager.setup_comprehensive_hooks()
             self.refresh_nodes()
         else:
             self.connection_status.text = ui_text.get('connection_failed_tcp', 'TCP connection failed')
@@ -168,6 +171,9 @@ class MeshViewerGUI:
             port_display = port or 'auto-detected'
             self.connection_status.text = ui_text.get('connected_serial_status', 'Connected via Serial on {port}').format(port=port_display)
             self.connection_status.classes('text-green')
+            # Set up comprehensive hooks to catch all packet types
+            self.connection_manager.enable_auto_refresh()
+            self.connection_manager.setup_comprehensive_hooks()
             self.refresh_nodes()
         else:
             self.connection_status.text = ui_text.get('connection_failed_serial', 'Serial connection failed')
@@ -187,6 +193,11 @@ class MeshViewerGUI:
         """Refresh the nodes display."""
         if not self.connected or not self.mesh_interface:
             return
+        
+        # Refresh nodes data and force last heard updates
+        self.mesh_interface.refresh_nodes_data()
+        self.mesh_interface.detect_last_heard_changes()
+        self.mesh_interface.force_last_heard_update()
         
         self.nodes_data = self.mesh_interface.get_all_nodes_data()
         self._update_nodes_display()

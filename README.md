@@ -69,6 +69,9 @@ Run the web-based interface:
 
 ```bash
 python main.py
+
+# if it gets locked up, and you get an Address already in use message use 
+lsof -ti:8080 | xargs kill -9
 ```
 
 The GUI will be available at `http://localhost:8080`
@@ -79,7 +82,14 @@ Run the command-line interface:
 
 ```bash
 python -m src.meshviewer.cli --mode continuous --interval 30
+python -m src.meshviewer.cli --mode continuous --interval 60 --full-refresh-interval 180 
+# the full refresh is needed for new data - unless it comes from a 'text message'
+# this seems to be a library issue ... 
+# better to just disconnect and reconnect I suspect.
+
 ```
+yep , know issue. https://discord.com/channels/867578229534359593/871553765105348668/1393628595754107120
+
 
 #### CLI Options
 

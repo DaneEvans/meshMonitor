@@ -3,7 +3,6 @@ Command-line interface for Meshtastic network monitoring.
 """
 import time
 import argparse
-from typing import Optional
 from .connection import MeshConnectionManager
 from .interface import MeshInterface
 
@@ -24,21 +23,30 @@ def text_oneshot(mesh_interface: MeshInterface, debug=False) -> None:
         print()
 
 
-def continuous_text(mesh_interface: MeshInterface, interval: int = 30) -> None:
+def continuous_text(mesh_interface: MeshInterface, connection_manager, interval: int = 30) -> None:
     """
     Continuous text-based monitoring of network status.
     
     Args:
         mesh_interface: MeshInterface instance
+        connection_manager: ConnectionManager instance
         interval: Refresh interval in seconds
     """
     print("Starting continuous monitoring... (Press Ctrl+C to stop)")
+    print("Note: Refreshing mesh data before each update...")
     
     try:
         while True:
             curr_time = time.strftime("%H:%M:%S", time.localtime())
             print(f"\nCurrent Time: {curr_time}")
             print("=" * 50)
+            
+            # Refresh nodes data before displaying to get latest information
+            mesh_interface.refresh_nodes_data()
+            # Detect changes in lastHeard timestamps
+            mesh_interface.detect_last_heard_changes()
+            # Force update of last heard timestamps
+            mesh_interface.force_last_heard_update()
             mesh_interface.get_battery_string(whole_mesh=True)
             print()
             time.sleep(interval)
@@ -80,11 +88,17 @@ def main():
     # Create mesh interface
     mesh_interface = MeshInterface(connection_manager.get_interface())
     
+    # Enable auto-refresh for continuous monitoring
+    if args.mode == "continuous":
+        connection_manager.enable_auto_refresh()
+        # Also set up comprehensive hooks to catch all packet types
+        connection_manager.setup_comprehensive_hooks()
+    
     # Run based on mode
     if args.mode == "oneshot":
         text_oneshot(mesh_interface)
     else:
-        continuous_text(mesh_interface, args.interval)
+        continuous_text(mesh_interface, connection_manager, args.interval)
     
     # Cleanup
     connection_manager.disconnect()
