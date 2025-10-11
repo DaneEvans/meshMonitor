@@ -9,6 +9,7 @@ from meshviewer.config import ConfigManager
 from meshviewer.data_persistence import DataPersistence
 import time
 import plotly.graph_objects as go
+import socket
 
 
 class MeshViewerGUI:
@@ -74,8 +75,21 @@ class MeshViewerGUI:
                 ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
                 ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
         
+        def get_local_ip():
+            try:
+                # Use UDP to avoid actual connection
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
+                sock.close()
+                return ip
+            except Exception:
+                return "127.0.0.1"
+
         self.dark.enable()
-        ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
+        with ui.row().classes('w-full items-center justify-between gap-4'):
+            ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
+            ui.label(f"Server IP: {get_local_ip()}").classes('text-subtitle2 text-right')
 
         # Create tabs for different views
         with ui.tabs().classes('w-full') as self.tabs:
