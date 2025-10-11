@@ -2,6 +2,16 @@
 
 MeshMonitor is highly configurable through the `config.yaml` file. This guide covers all available configuration options and their usage.
 
+
+## Screenshots
+
+The following images provide visual examples of configuration and usage. All screenshots can be found in the `./screenshots/` directory of the repository.
+
+| Screenshot                                  | Description                        |
+|----------------------------------------------|------------------------------------|
+| ![](./screenshots/desktop_frontpage_crs.png) | Main dashboard                     |
+| ![](./screenshots/desktop_graph_crs.png)     | Plots                |
+
 ## Configuration File Location
 
 - **Default**: `config.yaml` in the application root directory
