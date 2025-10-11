@@ -321,22 +321,36 @@ class MeshViewerGUI:
             if is_charging:
                 bat_color = "#82d0fa"
             elif battery_level < 60:
-                bat_color = "#C10015"  # red for low battery
+                bat_color = "#C10015" 
             else:
                 bat_color = "#21ba45"
 
             voltage_color = "#bbbbbb"
-
         else:
             # Light mode
             if is_charging:
-                bat_color = "#1565c0"  # deeper blue, higher saturation
+                bat_color = "#1565c0" 
             elif battery_level < 60:
                 bat_color = "#C10015"  # red
             else:
                 bat_color = "#1b8d2b"  # more saturated green for better contrast
 
             voltage_color = "#666666"
+
+        ding = ui.audio('assets/ding.mp3', controls=False)
+
+        if battery_level < 60:
+            # Avoid duplicate ongoing notifications for the same node by keying on shortName
+            notif_key = f"lowbat_{node['user']['shortName']}"
+            if not hasattr(self, '_lowbat_notifs'):
+                self._lowbat_notifs = set()
+            if notif_key not in self._lowbat_notifs:
+                if battery_level < 30:
+                    ui.notify(f"Node {node['user']['shortName']} Needs to be charged", type='ongoing', color='red', position='top', key=notif_key)
+                else:
+                    ui.notify(f"Node {node['user']['shortName']} Needs to be charged", type='negative')
+                self._lowbat_notifs.add(notif_key)
+            ui.run_javascript(f'getElement({ding.id}).$el.play()')
 
 
         return ui.html(
