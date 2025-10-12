@@ -19,14 +19,10 @@ It is built using NiceGUI for the web interface and the [Meshtastic](https://mes
 
 #### Screenshots 
 
-**Front Page**
-![MeshMonitor Desktop Front Page](./screenshots/desktop_frontpage_default.png)
-![MeshMonitor Desktop Front Page](./screenshots/mobile_frontpage_default.png)
-
-**Graph View**
-![MeshMonitor Desktop Graph View](./screenshots/desktop_graph_default.png)
-![MeshMonitor Desktop Graph View](./screenshots/mobile_graph_default.png)
-
+|     | Desktop | Mobile |
+| --- | --- | --- |
+| Front Page | [MeshMonitor Desktop Front Page](./screenshots/desktop_frontpage_default.png) | [MeshMonitor Desktop Front Page](./screenshots/mobile_frontpage_default.png) |
+| Front Page | [MeshMonitor Desktop Front Page](./screenshots/desktop_graph_default.png) | [MeshMonitor Desktop Front Page](./screenshots/mobile_graph_default.png) |
 
 ### Command Line Interface (CLI)
 - **One-shot Mode**: Single status report and exit
