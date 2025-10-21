@@ -142,4 +142,20 @@ MeshMonitor creates a `data/` directory for storing:
 
 https://www.dexterindustries.com/howto/run-a-program-on-your-raspberry-pi-at-startup/
 
-using /home/dane/.bashrc
+Open Raspi-Config
+
+ - Turn on auto-logon in raspi-config
+ - make it cli default
+
+
+using /home/<user>/.bashrc
+
+add the following lines near the bottom:
+
+
+```
+echo Starting MeshMonitor
+sudo python /home/<user>/MeshMonitor/autorun.sh
+```
+
+It will now autorun, and automatically look for a node at the default IP address.
