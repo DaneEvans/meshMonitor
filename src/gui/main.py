@@ -824,4 +824,4 @@ class MeshViewerGUI:
     def run(self, **kwargs) -> None:
         """Run the GUI application."""
         self.setup_ui()
-        ui.run(**kwargs)
+        ui.run(**kwargs, favicon='favicon.ico')
