@@ -150,8 +150,9 @@ using `/home/<user>/.bashrc`
 add the following lines near the bottom of .bashrc:
 
 ```
-echo Starting MeshViewer
-sudo python /home/<user>/MeshViewer/autorun.sh
+echo Starting MeshMonitor
+cd /home/<user>/meshViewer
+sudo bash ./autorun.sh
 ```
 
 It will now autorun, and automatically look for a node at the default IP address.
