@@ -7,6 +7,9 @@ app:
   subtitle: "Meshtastic Network Monitor"
   page_title: "MeshViewer - Meshtastic Network Monitor"
   logo_path: "assets/M-PWRD.png"
+  contactname: "Site by Dane Evans"
+  contactsite: "https://daneevans.github.io/meshMonitor/"
+
 
 # Theme Configuration
 theme:
@@ -39,7 +42,7 @@ ui_text:
 
 # Default Connection Settings
 connection:
-  default_tcp_host: "192.168.0.114"
+  default_tcp_host: "192.168.0.135"
   default_tcp_port: 4403
 
 # Node Activity Settings
