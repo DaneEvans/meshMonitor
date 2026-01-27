@@ -48,3 +48,9 @@ connection:
 # Node Activity Settings
 nodes:
   active_threshold_hours: 3
+
+# Auto-reply / tapback settings
+notifications:
+  # Emoji to use for automatic tapback reactions (default: robot)
+  # auto_emoji: "🤖"
+  auto_emoji: "✅"

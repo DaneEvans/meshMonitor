@@ -14,6 +14,8 @@ except ImportError:
 import time
 from typing import Optional, Callable, Any
 
+from .config import ConfigManager
+
 
 class MeshConnectionManager:
     """Manages Meshtastic network connections."""
@@ -24,6 +26,10 @@ class MeshConnectionManager:
         self.connection_type: Optional[str] = None
         self.connection_params: Optional[dict] = None
         self.tapback_sent: set = set()  # Track message IDs that have already received tapbacks
+
+        # Load tapback emoji from config (default to robot to preserve behaviour)
+        cfg = ConfigManager()
+        self.tapback_emoji: str = cfg.get("notifications.auto_emoji", "🤖")
         
     def connect_tcp(self, host: str, port: int = 4403) -> bool:
         """
@@ -217,7 +223,8 @@ class MeshConnectionManager:
                             print(f"DEBUG: Connection lost, skipping reply (connection_type: {self.connection_type})")
                             return
                         try:
-                            self.send_tapback("🤖", message_id, from_node)
+                            # Use emoji in config.yaml for tapback
+                            self.send_tapback(self.tapback_emoji, message_id, from_node)
                             # time.sleep(5)
                             # self.send_text_reply("hello mesh", message_id, from_node)
                             # Mark as replied
@@ -342,8 +349,16 @@ class MeshConnectionManager:
             emoji_configs = {
                 "🤖": {
                     "number": 129302,
-                    "payload": b'\xF0\x9F\xA4\x96'  # UTF-8 bytes: \360\237\244\226
+                    "payload": b'\xF0\x9F\xA4\x96'  # 🤖
                 },
+                "✅": {
+                    "number": 9989,
+                    "payload": b'\xE2\x9C\x85'      # ✅
+                },
+                "👍": {
+                    "number": 128077,
+                    "payload": b'\xF0\x9F\x91\x8D'  # 👍
+                }
             }
             
             # Get emoji config, default to robot if not found
