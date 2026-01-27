@@ -54,3 +54,5 @@ notifications:
   # Emoji to use for automatic tapback reactions (default: robot)
   # auto_emoji: "🤖"
   auto_emoji: "✅"
+  # Enable or disable automatic tapback reactions
+  enable_auto_react: true

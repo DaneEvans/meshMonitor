@@ -30,6 +30,7 @@ class MeshConnectionManager:
         # Load tapback emoji from config (default to robot to preserve behaviour)
         cfg = ConfigManager()
         self.tapback_emoji: str = cfg.get("notifications.auto_emoji", "🤖")
+        self.enable_auto_react: bool = cfg.get("notifications.enable_auto_react", True)
         
     def connect_tcp(self, host: str, port: int = 4403) -> bool:
         """
@@ -202,7 +203,47 @@ class MeshConnectionManager:
 
                     print(f"INFO: Text rx | ch:{channel} | {text_content}")
 
-                    # Do not auto reply to a DM. 
+                    # Helper to derive node ID from from_node for replies
+                    def _node_id_from_from_node(node_num_or_id):
+                        if isinstance(node_num_or_id, int):
+                            return f"!{node_num_or_id:08x}"
+                        return node_num_or_id
+
+                    # Handle DM control commands: 'reply on' / 'reply off' / 'help' (case-insensitive)
+                    if channel == "DM":
+                        cmd = text_content.strip().lower()
+                        if cmd == "reply on":
+                            self.enable_auto_react = True
+                            msg = "Auto react ENABLED via DM command"
+                            print(f"INFO: {msg}")
+                            # Send confirmation back as a reply
+                            dest_id = _node_id_from_from_node(from_node)
+                            if message_id is not None and dest_id is not None:
+                                self.send_text(msg, message_id, dest_id)
+                            return
+                        if cmd == "reply off":
+                            self.enable_auto_react = False
+                            msg = "Auto react DISABLED via DM command"
+                            print(f"INFO: {msg}")
+                            # Send confirmation back as a reply
+                            dest_id = _node_id_from_from_node(from_node)
+                            if message_id is not None and dest_id is not None:
+                                self.send_text(msg, dest_id)
+                            return
+                        if cmd == "help":
+                            help_text = (
+                                "MeshMonitor commands:\n"
+                                " - reply on  : enable automatic emoji reactions\n"
+                                " - reply off : disable automatic emoji reactions\n"
+                                " - help      : show this help message"
+                            )
+                            print("INFO: DM help requested, sending help text")
+                            dest_id = _node_id_from_from_node(from_node)
+                            if message_id is not None and dest_id is not None:
+                                self.send_text(help_text, dest_id)
+                            return
+
+                    # Do not auto reply to other DMs. 
                     if channel == "DM":
                         print(f"DEBUG: Skipping DM message to {to_node}")
                         return
@@ -217,7 +258,7 @@ class MeshConnectionManager:
                         return
 
                     # Send both emoji tapback and text reply separately
-                    if message_id is not None and packet.get("channel", 0) != 0: # don't reply to channel 0
+                    if message_id is not None and packet.get("channel", 0) != 0 and self.enable_auto_react:  # don't reply to channel 0, honour config
                         # Verify connection is still active before sending (especially important for TCP)
                         if not self.is_connected() or self.interface is None:
                             print(f"DEBUG: Connection lost, skipping reply (connection_type: {self.connection_type})")
