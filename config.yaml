@@ -42,9 +42,17 @@ ui_text:
 
 # Default Connection Settings
 connection:
-  default_tcp_host: "192.168.0.135"
+  default_tcp_host: "192.168.0.113"
   default_tcp_port: 4403
 
 # Node Activity Settings
 nodes:
   active_threshold_hours: 3
+
+# Auto-reply / tapback settings
+notifications:
+  # Emoji to use for automatic tapback reactions (default: robot)
+  # auto_emoji: "🤖"
+  auto_emoji: "✅"
+  # Enable or disable automatic tapback reactions
+  enable_auto_react: true

@@ -20,7 +20,7 @@ MeshMonitor using in default configuration
    git clone https://github.com/daneevans/meshViewer.git
    cd meshViewer
    python3 -m venv .venv
-   source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+   source .venv/bin/activate  # On Windows: .venv/Scripts/activate
    pip install -r requirements.txt
    ```
 

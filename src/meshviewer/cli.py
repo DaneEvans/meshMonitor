@@ -92,7 +92,7 @@ def main():
     if args.mode == "continuous":
         connection_manager.enable_auto_refresh()
         # Also set up comprehensive hooks to catch all packet types
-        connection_manager.setup_comprehensive_hooks()
+        # connection_manager.setup_comprehensive_hooks()
     
     # Run based on mode
     if args.mode == "oneshot":

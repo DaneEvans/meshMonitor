@@ -227,7 +227,7 @@ class MeshViewerGUI:
             self.connection_status.classes('text-green')
             # Set up comprehensive hooks to catch all packet types
             self.connection_manager.enable_auto_refresh()
-            self.connection_manager.setup_comprehensive_hooks()
+            # self.connection_manager.setup_comprehensive_hooks()
             self.refresh_nodes()
             # Start automatic refresh every 5 minutes
             self.start_auto_refresh()
@@ -248,7 +248,7 @@ class MeshViewerGUI:
             self.connection_status.classes('text-green')
             # Set up comprehensive hooks to catch all packet types
             self.connection_manager.enable_auto_refresh()
-            self.connection_manager.setup_comprehensive_hooks()
+            # self.connection_manager.setup_comprehensive_hooks()
             self.refresh_nodes()
             # Start automatic refresh every 5 minutes
             self.start_auto_refresh()
