@@ -23,6 +23,7 @@ class MeshConnectionManager:
         self.interface: Optional[Any] = None
         self.connection_type: Optional[str] = None
         self.connection_params: Optional[dict] = None
+        self.tapback_sent: set = set()  # Track message IDs that have already received tapbacks
         
     def connect_tcp(self, host: str, port: int = 4403) -> bool:
         """
@@ -39,6 +40,10 @@ class MeshConnectionManager:
             self.interface = meshtastic.tcp_interface.TCPInterface(host)
             self.connection_type = "tcp"
             self.connection_params = {"host": host, "port": port}
+            
+            # Give the interface a moment to initialize
+            time.sleep(0.5)
+            
             return True
         except Exception as e:
             print(f"TCP connection failed: {e}")
@@ -65,6 +70,10 @@ class MeshConnectionManager:
                 self.interface = meshtastic.serial_interface.SerialInterface()
             self.connection_type = "serial"
             self.connection_params = {"port": port}
+            
+            # Give the interface a moment to initialize
+            time.sleep(0.5)
+            
             return True
         except Exception as e:
             print(f"Serial connection failed: {e}")
@@ -102,7 +111,8 @@ class MeshConnectionManager:
     
     def setup_callbacks(self, on_receive: Optional[Callable] = None, 
                        on_connection: Optional[Callable] = None,
-                       on_telemetry: Optional[Callable] = None) -> None:
+                       on_telemetry: Optional[Callable] = None,
+                       on_text: Optional[Callable] = None) -> None:
         """
         Setup callback functions for packet reception and connection events.
         
@@ -110,6 +120,7 @@ class MeshConnectionManager:
             on_receive: Function to call when a packet is received
             on_connection: Function to call when connection is established
             on_telemetry: Function to call when telemetry data is received
+            on_text: Function to call when a text message is received
         """
         if not pub:
             print("PubSub library not available")
@@ -121,144 +132,115 @@ class MeshConnectionManager:
             pub.subscribe(on_connection, "meshtastic.connection.established")
         if on_telemetry:
             pub.subscribe(on_telemetry, "meshtastic.telemetry.receive")
+        if on_text:
+            pub.subscribe(on_text, "meshtastic.receive.text")
     
     def enable_auto_refresh(self) -> None:
         """
         Enable automatic refresh of node data when packets are received.
         This sets up multiple callbacks to handle different packet types.
         """
+        if not self.interface:
+            return
+        
         def update_last_heard(packet, interface, packet_type=""):
             """Helper function to update lastHeard timestamp for any packet type."""
             try:
                 if packet and 'from' in packet:
-                    node_id = packet['from']
+                    from_node = packet['from']
                     current_time = int(time.time())
-                    timestamp = time.strftime("%H:%M:%S", time.localtime(current_time))
-                    node_short = node_id[-4:] if len(node_id) >= 4 else node_id
                     
+                    # Handle both integer node numbers and string node IDs
+                    if isinstance(from_node, int):
+                        node_id = f"!{from_node:08x}"
+                    else:
+                        node_id = from_node
+                    print(f"update_last_heard: {node_id}")
+
                     # Update the lastHeard timestamp in the interface's nodes dict
                     if hasattr(interface, 'nodes') and node_id in interface.nodes:
                         interface.nodes[node_id]['lastHeard'] = current_time
-                        print(f"DEBUG [{timestamp}] Updated lastHeard for node ...{node_short} from {packet_type} packet")
                         
-            except Exception as e:
+            except Exception:
                 # Don't let packet processing errors break the callback
-                timestamp = time.strftime("%H:%M:%S", time.localtime())
-                print(f"Warning [{timestamp}]: Error processing {packet_type} packet: {e}")
+                pass
         
         def on_packet_received(packet, interface):  # pylint: disable=unused-argument
             """Callback function called when a general packet is received."""
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
-            print(f"DEBUG [{timestamp}]: on_packet_received called - packet type: {type(packet)}")
-            if packet:
-                print(f"DEBUG [{timestamp}]: packet keys: {list(packet.keys()) if hasattr(packet, 'keys') else 'no keys'}")
+            print(f"DEBUG: on_packet_received called (connection_type: {self.connection_type})")
             update_last_heard(packet, interface, "general")
         
         def on_telemetry_received(packet, interface):  # pylint: disable=unused-argument
             """Callback function called when telemetry data is received."""
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
-            print(f"DEBUG [{timestamp}]: on_telemetry_received called - packet type: {type(packet)}")
-            if packet:
-                print(f"DEBUG [{timestamp}]: packet keys: {list(packet.keys()) if hasattr(packet, 'keys') else 'no keys'}")
+            print(f"DEBUG: on_telemetry_received called")
             update_last_heard(packet, interface, "telemetry")
+        
+        def on_text_received(packet, interface):  # pylint: disable=unused-argument
+            """Callback function called when a text message is received."""
+            print(f"DEBUG: on_text_received called (connection_type: {self.connection_type})")
+            if packet and isinstance(packet, dict) and 'decoded' in packet:
+                decoded = packet['decoded']
+                if isinstance(decoded, dict) and 'text' in decoded:
+                    text_content = decoded['text']
+                    update_last_heard(packet, interface, "text")
+
+                    # Extract message ID and sender from packet
+                    message_id = packet.get('id', None)
+                    from_node = packet.get('from', None)
+                    to_node = packet.get('to', None)
+
+                    channel = packet.get("channel", "Primary")
+                    # Check if it's a DM - if 'to' is not '0xFFFFFF', treat as DM
+                    if to_node is not None and to_node != 4294967295:
+                        channel = "DM"
+
+                    print(f"INFO: Text rx | ch:{channel} | {text_content}")
+
+                    # Do not auto reply to a DM. 
+                    if channel == "DM":
+                        print(f"DEBUG: Skipping DM message to {to_node}")
+                        return
+
+                    # Check if this is already an emoji reaction (skip replies for emoji messages)
+                    is_emoji_reaction = decoded.get('emoji', 0) != 0
+                    if is_emoji_reaction:
+                        return
+                    
+                    # Check if we've already replied to this message
+                    if message_id is not None and message_id in self.tapback_sent:
+                        return
+
+                    # Send both emoji tapback and text reply separately
+                    if message_id is not None and packet.get("channel", 0) != 0: # don't reply to channel 0
+                        # Verify connection is still active before sending (especially important for TCP)
+                        if not self.is_connected() or self.interface is None:
+                            print(f"DEBUG: Connection lost, skipping reply (connection_type: {self.connection_type})")
+                            return
+                        try:
+                            self.send_tapback("🤖", message_id, from_node)
+                            # time.sleep(5)
+                            # self.send_text_reply("hello mesh", message_id, from_node)
+                            # Mark as replied
+                            self.tapback_sent.add(message_id)
+                        except (SystemExit, KeyboardInterrupt):
+                            # Re-raise these critical exceptions
+                            raise
+                        except Exception as e:
+                            # Catch all other exceptions to prevent breaking PubSub callback chain
+                            # This is critical for TCP interfaces
+                            print(f"Failed to send reply in PubSub callback: {e}")
+                            import traceback
+                            traceback.print_exc()
+        
+        # Store callback reference for direct invocation
+        self._text_callback = on_text_received
         
         # Set up callbacks for different packet types
         self.setup_callbacks(
             on_receive=on_packet_received,
-            on_telemetry=on_telemetry_received
-        )
-        
-        # Add a general listener to see what events are being published
-        if pub:
-            def debug_listener(message, topic=pub.AUTO_TOPIC):
-                timestamp = time.strftime("%H:%M:%S", time.localtime())
-                print(f"DEBUG [{timestamp}]: PubSub event received - topic: {topic}")
-            
-            # Subscribe to all meshtastic events
-            pub.subscribe(debug_listener, "meshtastic")
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
-            print(f"DEBUG [{timestamp}]: Added general meshtastic event listener")
-        
-        # Also try to set up additional hooks that might exist
-        try:
-            # Try to hook into the interface's internal telemetry handler
-            if hasattr(self.interface, '_onTelemetryReceive'):
-                original_handler = self.interface._onTelemetryReceive
-                def enhanced_telemetry_handler(packet, interface):
-                    # Call the original handler first
-                    original_handler(packet, interface)
-                    # Then update our lastHeard timestamp
-                    update_last_heard(packet, interface, "telemetry_handler")
-                self.interface._onTelemetryReceive = enhanced_telemetry_handler
-                timestamp = time.strftime("%H:%M:%S", time.localtime())
-                print(f"DEBUG [{timestamp}]: Enhanced telemetry handler installed")
-        except Exception as e:
-            timestamp = time.strftime("%H:%M:%S", time.localtime())
-            print(f"DEBUG [{timestamp}]: Could not enhance telemetry handler: {e}")
-    
-    def setup_comprehensive_hooks(self) -> None:
-        """
-        Set up comprehensive hooks to catch all types of packets.
-        This method tries multiple approaches to ensure we catch telemetry and other packet types.
-        """
-        if not self.interface:
-            return
-            
-        timestamp = time.strftime("%H:%M:%S", time.localtime())
-        print(f"DEBUG [{timestamp}]: Setting up comprehensive packet hooks...")
-        
-        # List all available methods on the interface
-        interface_methods = [method for method in dir(self.interface) if not method.startswith('__')]
-        print(f"DEBUG [{timestamp}]: Available interface methods: {interface_methods}")
-        
-        # Check for specific attributes that might contain packet data
-        if hasattr(self.interface, 'packets'):
-            print(f"DEBUG [{timestamp}]: Interface has 'packets' attribute")
-        if hasattr(self.interface, 'recent_packets'):
-            print(f"DEBUG [{timestamp}]: Interface has 'recent_packets' attribute")
-        if hasattr(self.interface, '_packets'):
-            print(f"DEBUG [{timestamp}]: Interface has '_packets' attribute")
-        
-        # Try to find and hook telemetry-related methods
-        telemetry_methods = [method for method in interface_methods if 'telemetry' in method.lower()]
-        print(f"DEBUG [{timestamp}]: Telemetry-related methods: {telemetry_methods}")
-        
-        # Also look for packet-related methods
-        packet_methods = [method for method in interface_methods if 'packet' in method.lower()]
-        print(f"DEBUG [{timestamp}]: Packet-related methods: {packet_methods}")
-        
-        # Look for receive-related methods
-        receive_methods = [method for method in interface_methods if 'receive' in method.lower()]
-        print(f"DEBUG [{timestamp}]: Receive-related methods: {receive_methods}")
-        
-        # Try to hook into any telemetry methods we find
-        for method_name in telemetry_methods:
-            try:
-                original_method = getattr(self.interface, method_name)
-                if callable(original_method):
-                    def create_enhanced_handler(orig_method, name):
-                        def enhanced_handler(*args, **kwargs):
-                            result = orig_method(*args, **kwargs)
-                            # Try to extract node info from args/kwargs
-                            if args and len(args) > 0:
-                                packet = args[0] if args else None
-                                if packet and hasattr(packet, 'from_id'):
-                                    node_id = packet.from_id
-                                    current_time = int(time.time())
-                                    timestamp = time.strftime("%H:%M:%S", time.localtime(current_time))
-                                    node_short = node_id[-4:] if len(node_id) >= 4 else node_id
-                                    if hasattr(self.interface, 'nodes') and node_id in self.interface.nodes:
-                                        self.interface.nodes[node_id]['lastHeard'] = current_time
-                                        print(f"DEBUG [{timestamp}] Updated lastHeard for node ...{node_short} from {name}")
-                            return result
-                        return enhanced_handler
-                    
-                    setattr(self.interface, method_name, create_enhanced_handler(original_method, method_name))
-                    timestamp = time.strftime("%H:%M:%S", time.localtime())
-                    print(f"DEBUG [{timestamp}]: Enhanced {method_name} method")
-            except Exception as e:
-                timestamp = time.strftime("%H:%M:%S", time.localtime())
-                print(f"DEBUG [{timestamp}]: Could not enhance {method_name}: {e}")
+            on_telemetry=on_telemetry_received,
+            on_text=on_text_received
+        )    
     
     def send_text(self, text: str, destination_id: Optional[str] = None) -> bool:
         """
@@ -284,3 +266,118 @@ class MeshConnectionManager:
             print(f"Failed to send text: {e}")
             return False
     
+    def send_text_reply(self, text: str, reply_to_message_id: int, destination_id: Optional[str] = None) -> bool:
+        """
+        Send a text message reply with reply_id set in the decoded Data structure.
+        
+        Args:
+            text: Text message to send
+            reply_to_message_id: ID of the message being replied to
+            destination_id: Destination node ID (broadcast if None)
+            
+        Returns:
+            True if message sent successfully, False otherwise
+        """
+        if not self.is_connected():
+            return False
+        
+        try:
+            from meshtastic import mesh_pb2, portnums_pb2
+            
+            # Create a Data message with reply_id
+            data = mesh_pb2.Data()
+            data.payload = text.encode('utf-8')
+            data.reply_id = reply_to_message_id
+            
+            # Create a MeshPacket with the decoded Data
+            packet = mesh_pb2.MeshPacket()
+            packet.decoded.CopyFrom(data)
+            packet.decoded.portnum = portnums_pb2.TEXT_MESSAGE_APP
+            packet.want_ack = False
+            
+            # Set destination if specified
+            if destination_id:
+                # Convert destination_id (node ID) to node number if needed
+                dest_num = None
+                if hasattr(self.interface, 'nodes') and destination_id in self.interface.nodes:
+                    node_info = self.interface.nodes[destination_id]
+                    if isinstance(node_info, dict) and 'num' in node_info:
+                        dest_num = node_info['num']
+                
+                if dest_num is not None:
+                    packet.to = dest_num
+                        
+            self.interface._sendPacket(packet)
+            return True
+        except Exception as e:
+            print(f"Failed to send text reply: {e}")
+            return False
+    
+    def send_tapback(self, emoji: str, message_id: int, destination_id: Optional[str] = None) -> bool:
+        """
+        Send a tapback/reaction emoji to a message.
+        Follows the Android implementation structure exactly.
+        
+        Args:
+            emoji: Emoji character to send as reaction
+            message_id: ID of the message to react to
+            destination_id: Destination node ID (broadcast if None)
+            
+        Returns:
+            True if tapback sent successfully, False otherwise
+        """
+        if not self.is_connected():
+            return False
+        
+        # Check if we've already sent a tapback to this message
+        if message_id in self.tapback_sent:
+            return False
+        
+        try:
+            from meshtastic import mesh_pb2, portnums_pb2
+            
+            # Map emoji characters to their emoji numbers and payload bytes
+            # Robot emoji 🤖 = 129302 (decimal HTML entity)
+            # Payload bytes: \xF0\x9F\xA4\x96 (UTF-8 encoding of U+1F916)
+            emoji_configs = {
+                "🤖": {
+                    "number": 129302,
+                    "payload": b'\xF0\x9F\xA4\x96'  # UTF-8 bytes: \360\237\244\226
+                },
+            }
+            
+            # Get emoji config, default to robot if not found
+            if emoji in emoji_configs:
+                emoji_config = emoji_configs[emoji]
+                emoji_number = emoji_config["number"]
+                emoji_payload = emoji_config["payload"]
+            else:
+                # Default to robot emoji
+                emoji_number = 129302
+                emoji_payload = b'\xF0\x9F\xA4\x96'
+            
+            data = mesh_pb2.Data()
+            data.payload = emoji_payload  # Emoji bytes
+            data.reply_id = message_id  # ID of message being reacted to
+            data.emoji = emoji_number  # Emoji number (e.g., 129302 for robot)
+            
+            # Create a MeshPacket with the decoded Data
+            packet = mesh_pb2.MeshPacket()
+            packet.decoded.CopyFrom(data)
+            packet.decoded.portnum = portnums_pb2.TEXT_MESSAGE_APP  # Set portnum on decoded
+            packet.want_ack = False
+            
+            # Convert destination_id to node number if needed
+            dest_num = None
+            if destination_id:
+                if hasattr(self.interface, 'nodes') and destination_id in self.interface.nodes:
+                    node_info = self.interface.nodes[destination_id]
+                    if isinstance(node_info, dict) and 'num' in node_info:
+                        dest_num = node_info['num']                
+                if dest_num is not None:
+                    packet.to = dest_num
+            
+            self.interface._sendPacket(packet)
+        except Exception as e:
+            print(f"Failed to send tapback: {e}")
+            return False
