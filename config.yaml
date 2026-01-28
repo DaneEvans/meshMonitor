@@ -51,8 +51,6 @@ nodes:
 
 # Auto-reply / tapback settings
 notifications:
-  # Emoji to use for automatic tapback reactions (default: robot)
+  enable_auto_react: false
   # auto_emoji: "🤖"
   auto_emoji: "✅"
-  # Enable or disable automatic tapback reactions
-  enable_auto_react: true
