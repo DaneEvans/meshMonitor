@@ -362,9 +362,6 @@ class MeshViewerGUI:
             if not self.show_all_nodes and 'isFavorite' not in node.keys():
                 continue
             
-            if 'deviceMetrics' not in node.keys():
-                continue
-            
             with self.nodes_container:
                 self._create_node_card(node_id, node)
 
@@ -400,6 +397,10 @@ class MeshViewerGUI:
     def _create_node_card(self, node_id: str, node: Dict[str, Any]) -> None:
         """Create a card for displaying node information."""
         ui_text = self.config.get_ui_text().get('nodes', {})
+        user = node.get('user') or {}
+        short_name = user.get('shortName') or f"!{node_id[-8:]}"
+        long_name = user.get('longName') or node_id
+        hw_model = user.get('hwModel') or ui_text.get('unknown_hw', 'Unknown')
         
         with ui.card().classes('w-full mb-1 py-1'):
             bg_color, font_color = self.get_nodechip_colour(node_id)
@@ -410,12 +411,12 @@ class MeshViewerGUI:
                     with ui.row().classes('w-full items-center justify-between'):
                         with ui.row().classes('items-left'):
                             with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
-                                ui.label(node['user']['shortName']).classes(label_classes).style(f'color: {font_color};')
-                            ui.label(node['user']['longName']).classes('text-h6')
+                                ui.label(short_name).classes(label_classes).style(f'color: {font_color};')
+                            ui.label(long_name).classes('text-h6')
                         with ui.row().classes('items-right'):
+                            self.render_last_heard(node)
                             if 'deviceMetrics' in node:
-                                self.render_last_heard(node)
-                                self.render_battery_string(node)
+                                self.render_battery_string(node, node_id=node_id)
 
 
                 # The expansion content is the detailed view
@@ -423,9 +424,9 @@ class MeshViewerGUI:
                     if 'deviceMetrics' in node:
                         uptime_hours = self.mesh_interface.get_uptime(node, asString = False)
                         ui.label(f"up {uptime_hours:4.1f} hrs").classes('text-sm')
-                        channel_util = node['deviceMetrics']['channelUtilization']
+                        channel_util = node.get('deviceMetrics', {}).get('channelUtilization', 0.0)
                         ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption')
-                    ui.label(f"{ui_text.get('hw_label', 'HW')}: {node['user']['hwModel']}").classes('text-caption')
+                    ui.label(f"{ui_text.get('hw_label', 'HW')}: {hw_model}").classes('text-caption')
                     ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption')
 
 
@@ -439,7 +440,7 @@ class MeshViewerGUI:
         if hasattr(self, 'node_count_label'):
             self.node_count_label.update()
 
-    def render_battery_string(self, node):
+    def render_battery_string(self, node, node_id: str = ""):
         battery_level, voltage, is_charging = self.mesh_interface.get_node_battery_status(node, asString = False)
         if is_charging:
             bat_str = " Chg"
@@ -472,14 +473,15 @@ class MeshViewerGUI:
 
         if battery_level < 60:
             # Avoid duplicate ongoing notifications for the same node by keying on shortName
-            notif_key = f"lowbat_{node['user']['shortName']}"
+            short_name = (node.get('user') or {}).get('shortName') or (f"!{node_id[-8:]}" if node_id else "Unknown")
+            notif_key = f"lowbat_{short_name}"
             if not hasattr(self, '_lowbat_notifs'):
                 self._lowbat_notifs = set()
             if notif_key not in self._lowbat_notifs:
                 if battery_level < 30:
-                    ui.notify(f"Node {node['user']['shortName']} Needs to be charged", type='ongoing', color='red', position='top', key=notif_key)
+                    ui.notify(f"Node {short_name} Needs to be charged", type='ongoing', color='red', position='top', key=notif_key)
                 else:
-                    ui.notify(f"Node {node['user']['shortName']} Needs to be charged", type='negative')
+                    ui.notify(f"Node {short_name} Needs to be charged", type='negative')
                 self._lowbat_notifs.add(notif_key)
             ui.run_javascript(f'getElement({ding.id}).$el.play()')
 
@@ -492,7 +494,12 @@ class MeshViewerGUI:
         )
 
     def render_last_heard(self, node):
-        last_heard = self.mesh_interface.get_last_heard(node, asString = False)
+        last_heard = int((node or {}).get('lastHeard') or 0)
+        if last_heard <= 0:
+            ui.html(
+                f'<span class="text-sm" style="color:{"#bbbbbb" if self.dark.value else "#666666"};">Last Heard:<br>Unknown</span>'
+            )
+            return
         now = int(time.time())
         delta = now - last_heard
         if delta > 6 * 3600:
