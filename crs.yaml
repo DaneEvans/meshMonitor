@@ -49,6 +49,6 @@ nodes:
 
 # Auto-reply / tapback settings
 notifications:
-  enable_auto_react: false
-  # auto_emoji: "🤖"
-  auto_emoji: "✅"
+  enable_auto_react: true
+  auto_emoji: "🤖"
+  # auto_emoji: "✅"
