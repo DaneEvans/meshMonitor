@@ -166,20 +166,40 @@ class MeshViewerGUI:
             def get_node_count_info(_=None):
                 if not self.connected or not self.mesh_interface or not hasattr(self.mesh_interface, 'interface'):
                     return "Total Nodes: 0 | Active (3h): 0"
-                
+
+                # Debounce display until values are final (avoid showing intermediate counts as the mesh loads)
                 nodes = list(self.mesh_interface.interface.nodes.values())
                 total_nodes = len(nodes)
-                
-                # Count nodes heard from in the last 3 hours
+
+                # Don't show count unless mesh info is 'stable' (i.e. mesh is fully loaded and not in early phases)
+                # We define "final" as when all nodes have a valid 'lastHeard' timestamp 
+                # and at least one node is heard recently, or total_nodes is stable for >1s.
+                # For now: just prevent redraw unless the counts have changed from the last value.
+
+                # "Sticky" previous values for display
+                if not hasattr(self, '_last_node_count_info'):
+                    self._last_node_count_info = None
+                    self._stable_node_counts = (0, 0)
+                    self._last_update_time = 0
+
                 current_time = int(time.time())
                 three_hours_ago = current_time - (self.active_threshold * 3600)
-                active_nodes = 0
-                
-                for node in nodes:
-                    if 'lastHeard' in node and node['lastHeard'] >= three_hours_ago:
-                        active_nodes += 1
-                
-                return f"Nodes online: {active_nodes}/{total_nodes}"
+                active_nodes = sum(1 for node in nodes if 'lastHeard' in node and node['lastHeard'] >= three_hours_ago)
+
+                # Only update if both counts appear final (i.e. not in the process of loading more nodes)
+                # Simple debounce: only update if the value is different after a short interval
+                node_tuple = (active_nodes, total_nodes)
+                now = time.time()
+                if node_tuple != self._stable_node_counts:
+                    self._stable_node_counts = node_tuple
+                    self._last_update_time = now
+                    return ''  # Blank out label until stable, hide in-between values
+                elif now - self._last_update_time < 1.0:
+                    return ''  # Wait at least 1s at stable value before displaying
+                else:
+                    info_str = f"Nodes online: {active_nodes}/{total_nodes}"
+                    self._last_node_count_info = info_str
+                    return info_str
 
             self.node_count_label = ui.label(get_node_count_info()).classes('text-h6 text-center w-full mb-2')
             self.node_count_label.bind_text_from(self, 'connected', get_node_count_info)
