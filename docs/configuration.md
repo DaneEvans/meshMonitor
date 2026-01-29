@@ -108,6 +108,36 @@ nodes:
 **Options:**
 - `active_threshold_hours`: Hours since last communication to consider a node "active"
 
+### Auto Response / Tapback (Notifications)
+
+```yaml
+notifications:
+  enable_auto_react: false
+  auto_emoji: "✅"
+```
+
+**Options:**
+- `enable_auto_react`: If true, send an automatic tapback emoji reaction to received messages on non-primary channels
+- `auto_emoji`: Emoji to use for the tapback (e.g., "🤖", "✅", "👍")
+
+### Auto Message (Scheduled Messages)
+
+```yaml
+automessage:
+  enabled: false
+  messages:
+    - interval: 15    # minutes
+      channel: 1      # Meshtastic channel 
+      msg: "Hello mesh"
+```
+
+**Options:**
+- `enabled`: Enable/disable scheduled messages
+- `messages`: Array of message objects
+  - `interval`: Send interval in minutes (must be > 0)
+  - `channel`: Meshtastic channel index to send on (0 = Primary)
+  - `msg`: Message text
+
 ## Configuration Examples
 
 ### Dark Mode Configuration
