@@ -96,7 +96,11 @@ class MeshViewerGUI:
             ui.tab('Network View', icon='network_check')
             ui.tab('Battery History', icon='battery_charging_full')
             autoresp_text = self.config.get_ui_text().get('autoresponse', {})
-            ui.tab(autoresp_text.get('tab_title', 'Auto Response'), icon='smart_toy')
+            autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
+            ui.tab(autoresp_tab, icon='smart_toy')
+            automsg_text = self.config.get_ui_text().get('automessage', {})
+            automsg_tab = automsg_text.get('tab_title', 'Auto Message')
+            ui.tab(automsg_tab, icon='schedule')
         
         with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
             with ui.tab_panel('Network View'):
@@ -112,8 +116,11 @@ class MeshViewerGUI:
             with ui.tab_panel('Battery History'):
                 self._setup_battery_history_panel()
             
-            with ui.tab_panel('Auto Response'):
+            with ui.tab_panel(autoresp_tab):
                 self._setup_autoresponse_panel()
+
+            with ui.tab_panel(automsg_tab):
+                self._setup_automessage_panel()
             
 
     
@@ -271,6 +278,146 @@ class MeshViewerGUI:
             emoji_select.on_value_change(_apply_emoji)
 
             # Keep the status fresh without user interaction (lightweight, non-blocking)
+            ui.timer(1.0, _refresh_status)
+            _refresh_status()
+
+    def _setup_automessage_panel(self) -> None:
+        """Setup the auto message (scheduled broadcast) settings panel.
+
+        Notes:
+        - These settings are runtime-only overrides (they are not written to config.yaml).
+        - Messages are sent by `MeshConnectionManager` while connected.
+        """
+        ui_text = self.config.get_ui_text().get('automessage', {})
+        with ui.card().classes('w-full'):
+            ui.label(ui_text.get('title', 'Auto Message')).classes('text-h6')
+            ui.label(ui_text.get('subtitle', 'Session-only settings (won’t persist after reboot).')).classes('text-caption text-gray-500')
+
+            # Draft list kept in the UI; manager filters/validates before scheduling.
+            draft_messages = list(self.connection_manager.get_auto_messages())
+            # Ensure each draft has an explicit enabled flag; existing config messages default to enabled.
+            for m in draft_messages:
+                if 'enabled' not in m:
+                    m['enabled'] = True
+
+            status = ui.label().classes('text-caption')
+            messages_container = ui.column().classes('w-full')
+
+            def _apply_to_manager() -> None:
+                self.connection_manager.set_auto_messages(draft_messages)
+
+            def _refresh_status() -> None:
+                enabled = bool(getattr(self.connection_manager, 'enable_auto_message', False))
+                conn = ui_text.get('status_connected', 'connected') if self.connected else ui_text.get('status_not_connected', 'not connected')
+                status_prefix = ui_text.get('status_prefix', 'Status')
+                auto_key = ui_text.get('status_auto_message', 'auto message')
+                msgs_key = ui_text.get('status_messages', 'messages')
+                on_label = ui_text.get('status_on', 'ON')
+                off_label = ui_text.get('status_off', 'OFF')
+                active_count = len(self.connection_manager.get_auto_messages())
+                status.text = f"{status_prefix}: {conn} | {auto_key}: {on_label if enabled else off_label} | {msgs_key}: {active_count}"
+                status.update()
+
+            def _render_rows() -> None:
+                messages_container.clear()
+
+                if not draft_messages:
+                    with messages_container:
+                        ui.label('(no scheduled messages)').classes('text-gray-500 text-caption')
+                    return
+
+                interval_label = ui_text.get('interval_label', 'Interval (mins)')
+                channel_label = ui_text.get('channel_label', 'Channel')
+                message_label = ui_text.get('message_label', 'Message')
+                delete_label = ui_text.get('delete_label', 'Delete')
+
+                for i, m in enumerate(draft_messages):
+                    with messages_container:
+                        with ui.row().classes('w-full items-center gap-2 flex-col md:flex-row'):
+                            row_enabled = ui.checkbox(
+                                'Enabled',
+                                value=bool(m.get('enabled', False)),
+                            ).classes('w-24')
+                            interval_in = ui.number(
+                                interval_label,
+                                value=m.get('interval', 15),
+                                min=0.1,
+                                step=1,
+                            ).classes('w-40')
+                            channel_in = ui.number(
+                                channel_label,
+                                value=m.get('channel', 0),
+                                min=0,
+                                step=1,
+                            ).classes('w-28')
+                            msg_in = ui.input(message_label, value=m.get('msg', '')).classes('flex-1 min-w-0')
+
+                            def _delete(_=None, idx=i) -> None:
+                                try:
+                                    draft_messages.pop(idx)
+                                except Exception:
+                                    return
+                                _apply_to_manager()
+                                _render_rows()
+                                _refresh_status()
+
+                            ui.button(delete_label, on_click=_delete).props('color=negative').classes('w-28')
+
+                            def _set_interval(e, idx=i) -> None:
+                                try:
+                                    draft_messages[idx]['interval'] = float(getattr(e, 'value', e))
+                                except Exception:
+                                    draft_messages[idx]['interval'] = getattr(e, 'value', e)
+                                _apply_to_manager()
+                                _refresh_status()
+
+                            def _set_channel(e, idx=i) -> None:
+                                try:
+                                    draft_messages[idx]['channel'] = int(getattr(e, 'value', e))
+                                except Exception:
+                                    draft_messages[idx]['channel'] = getattr(e, 'value', e)
+                                _apply_to_manager()
+                                _refresh_status()
+
+                            def _set_msg(e, idx=i) -> None:
+                                draft_messages[idx]['msg'] = str(getattr(e, 'value', e))
+                                _apply_to_manager()
+                                _refresh_status()
+
+                            def _set_row_enabled(e, idx=i) -> None:
+                                draft_messages[idx]['enabled'] = bool(getattr(e, 'value', e))
+                                _apply_to_manager()
+                                _refresh_status()
+
+                            row_enabled.on_value_change(_set_row_enabled)
+                            interval_in.on_value_change(_set_interval)
+                            channel_in.on_value_change(_set_channel)
+                            msg_in.on_value_change(_set_msg)
+
+            with ui.row().classes('w-full items-center gap-4'):
+                enable_switch = ui.switch(
+                    ui_text.get('enable_label', 'Enable auto messages'),
+                    value=bool(getattr(self.connection_manager, 'enable_auto_message', False)),
+                )
+
+                def _apply_enabled(e) -> None:
+                    self.connection_manager.set_auto_message_enabled(bool(getattr(e, "value", e)))
+                    _refresh_status()
+
+                enable_switch.on_value_change(_apply_enabled)
+
+                def _add_message() -> None:
+                    # New rows start disabled so you can finish typing before they are eligible to send.
+                    draft_messages.append({'interval': 15, 'channel': 0, 'msg': '', 'enabled': False})
+                    _apply_to_manager()
+                    _render_rows()
+                    _refresh_status()
+
+                ui.button(ui_text.get('add_label', 'Add message'), on_click=_add_message).classes('w-40')
+
+            ui.label('Channel index: 0 = Primary, 1 = Secondary, ...').classes('text-caption text-gray-500')
+
+            _render_rows()
             ui.timer(1.0, _refresh_status)
             _refresh_status()
     

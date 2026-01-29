@@ -55,6 +55,25 @@ ui_text:
     status_on: "ON"
     status_off: "OFF"
 
+  automessage:
+    tab_title: "Auto Message"
+    title: "Auto Message"
+    subtitle: "Send scheduled messages. Session-only overrides (changes won’t persist after reboot). Use the config file for defaults."
+    enable_label: "Enable auto messages"
+    add_label: "Add message"
+    interval_label: "Interval (mins)"
+    channel_label: "Channel"
+    message_label: "Message"
+    delete_label: "Delete"
+
+    status_prefix: "Status"
+    status_connected: "connected"
+    status_not_connected: "not connected"
+    status_auto_message: "auto message"
+    status_messages: "messages"
+    status_on: "ON"
+    status_off: "OFF"
+
 # Default Connection Settings
 connection:
   default_tcp_host: "192.168.0.113"
@@ -69,3 +88,12 @@ notifications:
   enable_auto_react: false
   # auto_emoji: "🤖"
   auto_emoji: "✅"
+
+# Scheduled messages (broadcast) on an interval
+automessage:
+  enabled: false
+  # enabled: true
+  messages:
+    - interval: 8    # minutes
+      channel: 0      # Meshtastic channel index (0 = Primary)
+      msg: "ADLED GREEN"
