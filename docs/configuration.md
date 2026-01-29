@@ -127,7 +127,7 @@ automessage:
   enabled: false
   messages:
     - interval: 15    # minutes
-      channel: 1      # Meshtastic channel index (0 = Primary)
+      channel: 1      # Meshtastic channel 
       msg: "Hello mesh"
 ```
 
