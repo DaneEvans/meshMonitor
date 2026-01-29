@@ -28,18 +28,19 @@ def main():
     """Run all tests."""
     print("MeshViewer Test Suite")
     print("="*60)
+    print(f"Python: {sys.executable}")
     
     tests_dir = Path(__file__).parent / "tests"
     
     if not tests_dir.exists():
-        print("❌ Tests directory not found!")
+        print("[FAIL] Tests directory not found!")
         return False
     
     # Find all test files
     test_files = list(tests_dir.glob("test_*.py"))
     
     if not test_files:
-        print("❌ No test files found in tests directory!")
+        print("[FAIL] No test files found in tests directory!")
         return False
     
     print(f"Found {len(test_files)} test file(s)")
@@ -51,9 +52,9 @@ def main():
     for test_file in test_files:
         if run_test(test_file):
             passed += 1
-            print(f"✅ {test_file.name} PASSED")
+            print(f"[OK] {test_file.name} PASSED")
         else:
-            print(f"❌ {test_file.name} FAILED")
+            print(f"[FAIL] {test_file.name} FAILED")
     
     # Summary
     print(f"\n{'='*60}")
@@ -61,10 +62,10 @@ def main():
     print('='*60)
     
     if passed == total:
-        print("🎉 All tests passed!")
+        print("[OK] All tests passed!")
         return True
     else:
-        print("💥 Some tests failed!")
+        print("[FAIL] Some tests failed!")
         return False
 
 

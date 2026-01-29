@@ -12,26 +12,26 @@ sys.path.insert(0, str(src_path))
 def test_imports():
     """Test that all modules can be imported correctly."""
     try:
-        from meshtastic.connection import MeshConnectionManager
-        from meshtastic.interface import MeshInterface
-        from meshtastic.cli import main as cli_main
+        from meshviewer.connection import MeshConnectionManager
+        from meshviewer.interface import MeshInterface
+        from meshviewer.cli import main as cli_main
         from gui.main import MeshViewerGUI
-        print("✓ All imports successful")
+        print("[OK] All imports successful")
         return True
     except ImportError as e:
-        print(f"✗ Import error: {e}")
+        print(f"[FAIL] Import error: {e}")
         return False
 
 def test_connection_manager():
     """Test connection manager initialization."""
     try:
-        from meshtastic.connection import MeshConnectionManager
+        from meshviewer.connection import MeshConnectionManager
         manager = MeshConnectionManager()
         assert not manager.is_connected()
-        print("✓ Connection manager works")
+        print("[OK] Connection manager works")
         return True
     except Exception as e:
-        print(f"✗ Connection manager error: {e}")
+        print(f"[FAIL] Connection manager error: {e}")
         return False
 
 def test_gui_initialization():
@@ -41,10 +41,10 @@ def test_gui_initialization():
         gui = MeshViewerGUI()
         assert gui.connection_manager is not None
         assert not gui.connected
-        print("✓ GUI initialization works")
+        print("[OK] GUI initialization works")
         return True
     except Exception as e:
-        print(f"✗ GUI initialization error: {e}")
+        print(f"[FAIL] GUI initialization error: {e}")
         return False
 
 def main():
@@ -67,9 +67,9 @@ def main():
     print(f"Tests passed: {passed}/{len(tests)}")
     
     if passed == len(tests):
-        print("✓ All tests passed! Structure is working correctly.")
+        print("[OK] All tests passed! Structure is working correctly.")
     else:
-        print("✗ Some tests failed. Check the errors above.")
+        print("[FAIL] Some tests failed. Check the errors above.")
 
 if __name__ == "__main__":
     main()
