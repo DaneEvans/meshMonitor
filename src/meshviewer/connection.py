@@ -19,6 +19,9 @@ from .config import ConfigManager
 
 class MeshConnectionManager:
     """Manages Meshtastic network connections."""
+
+    # Keep a small, explicit allowlist for GUI selection (session-only overrides)
+    SUPPORTED_TAPBACK_EMOJIS = ["🤖", "✅", "👍"]
     
     def __init__(self):
         """Initialize the connection manager."""
@@ -31,6 +34,15 @@ class MeshConnectionManager:
         cfg = ConfigManager()
         self.tapback_emoji: str = cfg.get("notifications.auto_emoji", "🤖")
         self.enable_auto_react: bool = cfg.get("notifications.enable_auto_react", True)
+
+    def set_auto_react_enabled(self, enabled: bool) -> None:
+        """Enable/disable automatic emoji reactions (runtime only)."""
+        self.enable_auto_react = bool(enabled)
+
+    def set_tapback_emoji(self, emoji: str) -> None:
+        """Set the tapback emoji (runtime only)."""
+        if emoji in self.SUPPORTED_TAPBACK_EMOJIS:
+            self.tapback_emoji = emoji
         
     def connect_tcp(self, host: str, port: int = 4403) -> bool:
         """

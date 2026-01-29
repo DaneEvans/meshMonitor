@@ -29,7 +29,7 @@ This guide covers the complete installation and setup process for MeshMonitor.
    
    # Windows
    python -m venv .venv
-   .venv\Scripts\activate
+   .venv/Scripts/activate
    ```
 
 3. **Install dependencies:**

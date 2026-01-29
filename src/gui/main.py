@@ -95,6 +95,8 @@ class MeshViewerGUI:
         with ui.tabs().classes('w-full') as self.tabs:
             ui.tab('Network View', icon='network_check')
             ui.tab('Battery History', icon='battery_charging_full')
+            autoresp_text = self.config.get_ui_text().get('autoresponse', {})
+            ui.tab(autoresp_text.get('tab_title', 'Auto Response'), icon='smart_toy')
         
         with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
             with ui.tab_panel('Network View'):
@@ -109,6 +111,9 @@ class MeshViewerGUI:
             
             with ui.tab_panel('Battery History'):
                 self._setup_battery_history_panel()
+            
+            with ui.tab_panel('Auto Response'):
+                self._setup_autoresponse_panel()
             
 
     
@@ -213,6 +218,61 @@ class MeshViewerGUI:
             
             # Initial load
             self.update_battery_chart()
+
+    def _setup_autoresponse_panel(self) -> None:
+        """Setup the auto response (auto-react) settings panel.
+
+        Notes:
+        - These settings are runtime-only overrides (they are not written to config.yaml).
+        - They apply immediately to the active `MeshConnectionManager`.
+        """
+        ui_text = self.config.get_ui_text().get('autoresponse', {})
+        with ui.card().classes('w-full'):
+            ui.label(ui_text.get('title', 'Auto Response')).classes('text-h6')
+            ui.label(ui_text.get('subtitle', 'Session-only settings (won’t persist after reboot).')).classes('text-caption text-gray-500')
+
+            with ui.row().classes('w-full flex-col md:flex-row gap-4 items-start md:items-center'):
+                auto_enabled = ui.switch(ui_text.get('enable_label', 'Enable auto react'), value=self.connection_manager.enable_auto_react)
+
+                emoji_options = {e: e for e in getattr(self.connection_manager, 'SUPPORTED_TAPBACK_EMOJIS', ["🤖", "✅", "👍"])}
+                emoji_select = ui.select(
+                    options=emoji_options,
+                    value=self.connection_manager.tapback_emoji,
+                    label=ui_text.get('emoji_label', 'Tapback emoji'),
+                ).classes('w-40')
+
+                status = ui.label().classes('text-caption')
+
+            def _refresh_status() -> None:
+                enabled = bool(self.connection_manager.enable_auto_react)
+                emoji = self.connection_manager.tapback_emoji
+                conn = ui_text.get('status_connected', 'connected') if self.connected else ui_text.get('status_not_connected', 'not connected')
+                status_prefix = ui_text.get('status_prefix', 'Status')
+                auto_key = ui_text.get('status_auto_react', 'auto react')
+                emoji_key = ui_text.get('status_emoji', 'emoji')
+                on_label = ui_text.get('status_on', 'ON')
+                off_label = ui_text.get('status_off', 'OFF')
+                status.text = f"{status_prefix}: {conn} | {auto_key}: {on_label if enabled else off_label} | {emoji_key}: {emoji}"
+                status.update()
+
+            def _apply_auto_enabled(e) -> None:
+                # No blocking work here; just set runtime flags.
+                self.connection_manager.set_auto_react_enabled(bool(getattr(e, "value", e)))
+                _refresh_status()
+
+            def _apply_emoji(e) -> None:
+                self.connection_manager.set_tapback_emoji(str(getattr(e, "value", e)))
+                # Ensure UI stays consistent with allowlist
+                emoji_select.value = self.connection_manager.tapback_emoji
+                _refresh_status()
+
+            # Use NiceGUI's value-change hooks to ensure these always fire.
+            auto_enabled.on_value_change(_apply_auto_enabled)
+            emoji_select.on_value_change(_apply_emoji)
+
+            # Keep the status fresh without user interaction (lightweight, non-blocking)
+            ui.timer(1.0, _refresh_status)
+            _refresh_status()
     
     def connect_tcp(self) -> None:
         """Connect via TCP."""

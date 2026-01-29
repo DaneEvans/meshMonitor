@@ -40,6 +40,21 @@ ui_text:
     hw_label: "HW"
     user_id_label: "User ID"
 
+  autoresponse:
+    tab_title: "Auto Response"
+    title: "Auto Response"
+    subtitle: "Autoresponse to messages on Secondary Channels. Session-only settings (won’t persist after reboot)."
+    enable_label: "Enable auto react"
+    emoji_label: "Tapback emoji"
+
+    status_prefix: "Status"
+    status_connected: "connected"
+    status_not_connected: "not connected"
+    status_auto_react: "auto react"
+    status_emoji: "emoji"
+    status_on: "ON"
+    status_off: "OFF"
+
 # Default Connection Settings
 connection:
   default_tcp_host: "192.168.0.113"
