@@ -172,9 +172,6 @@ class MeshViewerGUI:
                 total_nodes = len(nodes)
 
                 # Don't show count unless mesh info is 'stable' (i.e. mesh is fully loaded and not in early phases)
-                # We define "final" as when all nodes have a valid 'lastHeard' timestamp 
-                # and at least one node is heard recently, or total_nodes is stable for >1s.
-                # For now: just prevent redraw unless the counts have changed from the last value.
 
                 # "Sticky" previous values for display
                 if not hasattr(self, '_last_node_count_info'):
