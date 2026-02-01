@@ -36,21 +36,31 @@ class MeshConnectionManager:
     # Keep a small, explicit allowlist for GUI selection (session-only overrides)
     SUPPORTED_TAPBACK_EMOJIS = ["🤖", "✅", "👍"]
     
-    def __init__(self):
-        """Initialize the connection manager."""
+    def __init__(self, cfg: Optional[ConfigManager] = None, config_path: Optional[str] = None):
+        """Initialize the connection manager.
+
+        Args:
+            cfg: Optional existing ConfigManager instance to reuse.
+            config_path: Optional path to config file (used if `cfg` is None).
+        """
         self.interface: Optional[Any] = None
         self.connection_type: Optional[str] = None
         self.connection_params: Optional[dict] = None
         self.tapback_sent: set = set()  # Track message IDs that have already received tapbacks
 
+        # Use provided ConfigManager if given, otherwise construct one (optionally with config_path)
+        if cfg is not None:
+            self.config = cfg
+        else:
+            self.config = ConfigManager(config_path) if config_path is not None else ConfigManager()
+
         # Load tapback emoji from config (default to robot to preserve behaviour)
-        cfg = ConfigManager()
-        self.tapback_emoji: str = cfg.get("notifications.auto_emoji", "🤖")
-        self.enable_auto_react: bool = cfg.get("notifications.enable_auto_react", True)
+        self.tapback_emoji: str = self.config.get("notifications.auto_emoji", "🤖")
+        self.enable_auto_react: bool = self.config.get("notifications.enable_auto_react", True)
 
         # Auto-message (scheduled broadcast) settings
-        self.enable_auto_message: bool = bool(cfg.get("automessage.enabled", False))
-        self._auto_messages: List[AutoMessage] = self._parse_auto_messages(cfg.get("automessage.messages", []))
+        self.enable_auto_message: bool = bool(self.config.get("automessage.enabled", False))
+        self._auto_messages: List[AutoMessage] = self._parse_auto_messages(self.config.get("automessage.messages", []))
 
         # Background worker for auto-messages (only runs in this process; not persisted)
         self._auto_message_lock = threading.Lock()

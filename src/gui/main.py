@@ -23,7 +23,8 @@ class MeshViewerGUI:
 
         self.set_theme()
 
-        self.connection_manager = MeshConnectionManager()
+        # Pass shared ConfigManager to connection manager so both use the same config
+        self.connection_manager = MeshConnectionManager(cfg=self.config)
         self.mesh_interface: Optional[MeshInterface] = None
         self.connected = False
         self.show_all_nodes = True
