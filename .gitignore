@@ -2,3 +2,4 @@ myenv/
 .venv/
 **.pyc
 data/*
+runlogs/
