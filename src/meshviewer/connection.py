@@ -12,9 +12,22 @@ except ImportError:
     pub = None
     
 import time
-from typing import Optional, Callable, Any
+import threading
+from dataclasses import dataclass
+from typing import Optional, Callable, Any, List, Dict
 
 from .config import ConfigManager
+
+
+@dataclass
+class AutoMessage:
+    """A scheduled auto-message."""
+
+    interval_s: float  # interval in seconds
+    channel: int
+    msg: str
+    # Last minute (epoch minutes) when this message was sent, used with modulo scheduling.
+    last_sent_minute: Optional[int] = None
 
 
 class MeshConnectionManager:
@@ -35,6 +48,15 @@ class MeshConnectionManager:
         self.tapback_emoji: str = cfg.get("notifications.auto_emoji", "🤖")
         self.enable_auto_react: bool = cfg.get("notifications.enable_auto_react", True)
 
+        # Auto-message (scheduled broadcast) settings
+        self.enable_auto_message: bool = bool(cfg.get("automessage.enabled", False))
+        self._auto_messages: List[AutoMessage] = self._parse_auto_messages(cfg.get("automessage.messages", []))
+
+        # Background worker for auto-messages (only runs in this process; not persisted)
+        self._auto_message_lock = threading.Lock()
+        self._auto_message_stop = threading.Event()
+        self._auto_message_thread: Optional[threading.Thread] = None
+
     def set_auto_react_enabled(self, enabled: bool) -> None:
         """Enable/disable automatic emoji reactions (runtime only)."""
         self.enable_auto_react = bool(enabled)
@@ -43,6 +65,144 @@ class MeshConnectionManager:
         """Set the tapback emoji (runtime only)."""
         if emoji in self.SUPPORTED_TAPBACK_EMOJIS:
             self.tapback_emoji = emoji
+
+    def get_auto_messages(self) -> List[Dict[str, Any]]:
+        """Get current auto-messages (runtime view for UI)."""
+        with self._auto_message_lock:
+            return [
+                {
+                    "interval": m.interval_s / 60.0,
+                    "channel": m.channel,
+                    "msg": m.msg,
+                    "enabled": True,
+                }
+                for m in self._auto_messages
+            ]
+
+    def set_auto_message_enabled(self, enabled: bool) -> None:
+        """Enable/disable scheduled auto-messages (runtime only)."""
+        with self._auto_message_lock:
+            self.enable_auto_message = bool(enabled)
+        if self.enable_auto_message and self.is_connected():
+            self._ensure_auto_message_thread()
+
+    def set_auto_messages(self, messages: Any) -> None:
+        """Replace scheduled auto-messages (runtime only)."""
+        parsed = self._parse_auto_messages(messages)
+        with self._auto_message_lock:
+            self._auto_messages = parsed
+        if self.enable_auto_message and self.is_connected():
+            self._ensure_auto_message_thread()
+
+    def _parse_auto_messages(self, raw: Any) -> List[AutoMessage]:
+        """Parse config/UI messages list into AutoMessage objects."""
+        # Preserve schedule alignment for existing messages where possible.
+        prev_by_key: Dict[tuple, AutoMessage] = {}
+        for m in getattr(self, "_auto_messages", []):
+            key = (round(m.interval_s / 60.0, 3), m.channel, m.msg)
+            prev_by_key[key] = m
+
+        if not raw:
+            return []
+        if not isinstance(raw, list):
+            return []
+
+        out: List[AutoMessage] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            # Accept multiple key spellings; config uses `interval` in minutes.
+            interval_mins = item.get("interval", item.get("interval_mins", item.get("intervalMinutes")))
+            channel = item.get("channel", 0)
+            msg = item.get("msg", item.get("message", ""))
+            enabled = bool(item.get("enabled", True))
+
+            try:
+                interval_mins_f = float(interval_mins)
+            except (TypeError, ValueError):
+                continue
+            if interval_mins_f <= 0:
+                continue
+
+            try:
+                channel_i = int(channel)
+            except (TypeError, ValueError):
+                channel_i = 0
+            if channel_i < 0:
+                channel_i = 0
+
+            msg_s = str(msg).strip()
+            if not msg_s or not enabled:
+                continue
+
+            key = (interval_mins_f, channel_i, msg_s)
+            prev = prev_by_key.get(key)
+            last_sent_minute = prev.last_sent_minute if prev else None
+
+            out.append(
+                AutoMessage(
+                    interval_s=interval_mins_f * 60.0,
+                    channel=channel_i,
+                    msg=msg_s,
+                    last_sent_minute=last_sent_minute,
+                )
+            )
+
+        return out
+
+    def _ensure_auto_message_thread(self) -> None:
+        """Start auto-message worker thread if needed."""
+        if self._auto_message_thread and self._auto_message_thread.is_alive():
+            return
+        self._auto_message_stop.clear()
+        self._auto_message_thread = threading.Thread(
+            target=self._auto_message_worker,
+            name="meshmonitor-auto-message",
+            daemon=True,
+        )
+        self._auto_message_thread.start()
+
+    def _stop_auto_message_thread(self) -> None:
+        """Stop auto-message worker thread."""
+        self._auto_message_stop.set()
+        t = self._auto_message_thread
+        if t and t.is_alive():
+            t.join(timeout=1.0)
+        self._auto_message_thread = None
+
+    def _auto_message_worker(self) -> None:
+        """Background worker that sends scheduled messages."""
+        while not self._auto_message_stop.is_set():
+            # Fast check without holding the lock during I/O.
+            with self._auto_message_lock:
+                enabled = bool(self.enable_auto_message)
+                messages = list(self._auto_messages)
+
+            if not enabled or not self.is_connected():
+                # Sleep lightly; wait() allows quicker shutdown.
+                self._auto_message_stop.wait(1.0)
+                continue
+
+            now_ts = time.time()
+            now_minute = int(now_ts // 60)
+            for m in messages:
+                # If message list was replaced, this object might be stale; that's OK.
+                interval_mins = max(1, int(round(m.interval_s / 60.0)))  # at least every 1 minute
+
+                # Align send time to minute boundaries: only send when (minutes % interval) == 0
+                if interval_mins <= 0 or (now_minute % interval_mins) != 0:
+                    continue
+                # Already sent in this minute
+                if m.last_sent_minute == now_minute:
+                    continue
+                # Send broadcast on a specific channel index.
+                ok = self.send_text(m.msg, channel_index=m.channel)
+                # Avoid rapid retries; remember the minute in which we sent.
+                m.last_sent_minute = now_minute
+                if ok:
+                    print(f"INFO: AutoMessage sent | ch:{m.channel} | every:{m.interval_s/60.0:g}m | {m.msg}")
+
+            self._auto_message_stop.wait(1.0)
         
     def connect_tcp(self, host: str, port: int = 4403) -> bool:
         """
@@ -62,7 +222,8 @@ class MeshConnectionManager:
             
             # Give the interface a moment to initialize
             time.sleep(0.5)
-            
+            if self.enable_auto_message:
+                self._ensure_auto_message_thread()
             return True
         except Exception as e:
             print(f"TCP connection failed: {e}")
@@ -92,7 +253,8 @@ class MeshConnectionManager:
             
             # Give the interface a moment to initialize
             time.sleep(0.5)
-            
+            if self.enable_auto_message:
+                self._ensure_auto_message_thread()
             return True
         except Exception as e:
             print(f"Serial connection failed: {e}")
@@ -100,6 +262,7 @@ class MeshConnectionManager:
     
     def disconnect(self) -> None:
         """Disconnect from the Meshtastic network."""
+        self._stop_auto_message_thread()
         if self.interface:
             try:
                 self.interface.close()
@@ -231,7 +394,7 @@ class MeshConnectionManager:
                             # Send confirmation back as a reply
                             dest_id = _node_id_from_from_node(from_node)
                             if message_id is not None and dest_id is not None:
-                                self.send_text(msg, message_id, dest_id)
+                                self.send_text(msg, dest_id)
                             return
                         if cmd == "reply off":
                             self.enable_auto_react = False
@@ -302,13 +465,14 @@ class MeshConnectionManager:
             on_text=on_text_received
         )    
     
-    def send_text(self, text: str, destination_id: Optional[str] = None) -> bool:
+    def send_text(self, text: str, destination_id: Optional[str] = None, channel_index: Optional[int] = None) -> bool:
         """
         Send text message to the network.
         
         Args:
             text: Text message to send
             destination_id: Destination node ID (broadcast if None)
+            channel_index: Meshtastic channel index (0 = Primary). If None, uses library default.
             
         Returns:
             True if message sent successfully, False otherwise
@@ -317,11 +481,39 @@ class MeshConnectionManager:
             return False
         
         try:
+            if self.interface is None:
+                return False
+
+            kwargs: Dict[str, Any] = {}
+            if channel_index is not None:
+                try:
+                    kwargs["channelIndex"] = int(channel_index)
+                except (TypeError, ValueError):
+                    pass
+
             if destination_id:
-                self.interface.sendText(text, destination_id)
+                # Prefer keyword args for compatibility across meshtastic versions.
+                if kwargs:
+                    self.interface.sendText(text, destination_id, **kwargs)
+                else:
+                    self.interface.sendText(text, destination_id)
             else:
-                self.interface.sendText(text)
+                if kwargs:
+                    self.interface.sendText(text, **kwargs)
+                else:
+                    self.interface.sendText(text)
             return True
+        except TypeError:
+            # Fallback if the installed meshtastic doesn't accept channelIndex
+            try:
+                if destination_id:
+                    self.interface.sendText(text, destination_id)
+                else:
+                    self.interface.sendText(text)
+                return True
+            except Exception as e:
+                print(f"Failed to send text: {e}")
+                return False
         except Exception as e:
             print(f"Failed to send text: {e}")
             return False
