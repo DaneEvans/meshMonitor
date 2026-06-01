@@ -243,6 +243,52 @@ class DataPersistence:
         
         return df[df['node_id'] == node_id].copy()
     
+    def get_last_known_nodes(self) -> Dict[str, Any]:
+        """
+        Reconstruct the most-recent known state for every node from the CSV.
+        Returns a dict keyed by node_id in the same shape used by MqttConnectionManager.
+        """
+        if not os.path.exists(self.csv_file):
+            return {}
+        try:
+            df = pd.read_csv(self.csv_file)
+            if df.empty:
+                return {}
+
+            # Keep only the latest row per node
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df = df.sort_values('timestamp')
+            latest = df.groupby('node_id').last().reset_index()
+
+            nodes: Dict[str, Any] = {}
+            for _, row in latest.iterrows():
+                node_id = str(row['node_id'])
+                battery_level = int(row.get('battery_level', 0) or 0)
+                voltage = float(row.get('voltage', 0.0) or 0.0)
+                uptime_hours = float(row.get('uptime_hours', 0.0) or 0.0)
+                channel_util = float(row.get('channel_utilization', 0.0) or 0.0)
+                last_heard = int(row.get('last_heard', 0) or 0)
+                nodes[node_id] = {
+                    'user': {
+                        'shortName': str(row.get('short_name', node_id[-4:]) or node_id[-4:]),
+                        'longName': str(row.get('long_name', node_id) or node_id),
+                        'hwModel': str(row.get('hw_model', 'Unknown') or 'Unknown'),
+                    },
+                    'deviceMetrics': {
+                        'batteryLevel': battery_level,
+                        'voltage': voltage,
+                        'uptimeSeconds': int(uptime_hours * 3600),
+                        'channelUtilization': channel_util,
+                    },
+                    'lastHeard': last_heard,
+                    '_from_persistence': True,
+                }
+            print(f"Loaded {len(nodes)} nodes from persistence")
+            return nodes
+        except Exception as e:
+            print(f"Warning: Could not load last known nodes: {e}")
+            return {}
+
     def get_latest_data(self) -> Optional[Dict[str, Any]]:
         """
         Get the most recent data snapshot.

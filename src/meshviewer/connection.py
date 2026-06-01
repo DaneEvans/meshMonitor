@@ -10,7 +10,13 @@ except ImportError:
     # Handle case where meshtastic library is not installed
     meshtastic = None
     pub = None
-    
+
+try:
+    import paho.mqtt.client as mqtt_client
+except ImportError:
+    mqtt_client = None
+
+import json
 import time
 import threading
 from dataclasses import dataclass
@@ -651,3 +657,281 @@ class MeshConnectionManager:
         except Exception as e:
             print(f"Failed to send tapback: {e}")
             return False
+
+
+class MqttConnectionManager:
+    """Manages a connection to a Mosquitto/MQTT broker and parses Meshtastic JSON messages."""
+
+    def __init__(self):
+        self._client = None
+        self._connected = False
+        self._nodes: Dict[str, Any] = {}  # sender_id -> node dict
+        self._lock = threading.Lock()
+        self._on_update: Optional[Callable] = None  # optional callback when nodes change
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def set_on_update(self, callback: Optional[Callable]) -> None:
+        """Register a no-arg callback that fires whenever node data changes."""
+        self._on_update = callback
+
+    def connect(self, url: str, username: str = "", password: str = "", topic: str = "#") -> bool:
+        """Connect to the MQTT broker and subscribe to *topic*.
+
+        Args:
+            url: Broker address. Supports ``hostname``, ``hostname:port``,
+                 ``mqtt://hostname``, or ``mqtt://hostname:port``.
+            username: MQTT username (empty string = anonymous).
+            password: MQTT password.
+            topic: Topic to subscribe to (default ``#`` = all).
+
+        Returns:
+            True if the connection attempt was initiated without error.
+        """
+        if not mqtt_client:
+            print("ERROR: paho-mqtt library not installed")
+            return False
+
+        # Parse URL
+        host, port = self._parse_url(url)
+
+        self.disconnect()  # clean up any previous connection
+
+        try:
+            client = mqtt_client.Client(
+                client_id="meshmonitor",
+                clean_session=True,
+                protocol=mqtt_client.MQTTv311,
+            )
+            if username:
+                client.username_pw_set(username, password)
+
+            self._subscribe_topic = topic
+
+            client.on_connect = self._on_connect
+            client.on_disconnect = self._on_disconnect
+            client.on_message = self._on_message
+
+            client.connect_async(host, port, keepalive=60)
+            client.loop_start()
+            self._client = client
+            return True
+        except Exception as e:
+            print(f"MQTT connect error: {e}")
+            return False
+
+    def disconnect(self) -> None:
+        """Disconnect from the broker and stop the background loop."""
+        if self._client:
+            try:
+                self._client.loop_stop()
+                self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+        self._connected = False
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def get_nodes_data(self) -> Dict[str, Any]:
+        """Return a snapshot of the current node data (thread-safe copy)."""
+        with self._lock:
+            return dict(self._nodes)
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_url(url: str):
+        """Parse a broker URL into (host, port)."""
+        url = url.strip()
+        if url.startswith("mqtt://"):
+            url = url[7:]
+        if ":" in url:
+            host, port_str = url.rsplit(":", 1)
+            try:
+                port = int(port_str)
+            except ValueError:
+                port = 1883
+        else:
+            host = url
+            port = 1883
+        return host, port
+
+    # ------------------------------------------------------------------
+    # Paho callbacks
+    # ------------------------------------------------------------------
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            self._connected = True
+            topic = getattr(self, "_subscribe_topic", "#")
+            client.subscribe(topic)
+            print(f"MQTT connected, subscribed to '{topic}'")
+        else:
+            print(f"MQTT connect failed (rc={rc})")
+            self._connected = False
+
+    def _on_disconnect(self, client, userdata, rc):
+        self._connected = False
+        print(f"MQTT disconnected (rc={rc})")
+
+    def _on_message(self, client, userdata, msg):
+        """Parse an incoming MQTT message and update the nodes dict."""
+        try:
+            payload_str = msg.payload.decode("utf-8", errors="replace")
+            data = json.loads(payload_str)
+        except Exception:
+            return  # ignore non-JSON messages
+
+        msg_type = data.get("type", "")
+        # IMPORTANT: Use packet `from` as the authoritative node identity.
+        # Do not derive node identity from MQTT topic path.
+        node_id = ""
+        from_field = data.get("from")
+        if from_field is not None:
+            try:
+                if isinstance(from_field, str):
+                    f = from_field.strip()
+                    if f.startswith("!") and len(f) >= 9:
+                        node_id = f.lower()
+                    else:
+                        node_id = f"!{int(f):08x}"
+                else:
+                    node_id = f"!{int(from_field):08x}"
+            except Exception:
+                node_id = ""
+
+        # Fallback only when `from` is absent/unparseable.
+        if not node_id:
+            sender = str(data.get("sender", "")).strip()
+            if sender:
+                node_id = sender.lower()
+
+        if not node_id:
+            return
+
+        topic_path = msg.topic
+
+        # Determine if this node is the MQTT bridge (it published its own packet)
+        sender_field = str(data.get("sender", "")).strip().lower()
+        is_bridge = bool(sender_field) and (sender_field == node_id.lower())
+
+        with self._lock:
+            node = self._nodes.get(node_id)
+            if node is None:
+                node = {
+                    "user": {
+                        "shortName": node_id[-4:].upper(),
+                        "longName": node_id,
+                        "hwModel": "MQTT",
+                    },
+                    "_mqtt_source": True,
+                    "mqtt_topic": topic_path,
+                    "lastHeard": int(data.get("timestamp", time.time())),
+                }
+                self._nodes[node_id] = node
+            else:
+                # Always update topic and lastHeard
+                node["mqtt_topic"] = topic_path
+                node["lastHeard"] = int(data.get("timestamp", time.time()))
+                # This is now a live MQTT node — clear the persisted-only flag
+                node["_mqtt_source"] = True
+                node.pop("_from_persistence", None)
+
+            # Latch bridge flag — once seen as bridge, keep it
+            if is_bridge:
+                node["_is_bridge"] = True
+
+            # Telemetry payloads carry device metrics
+            if msg_type == "telemetry":
+                payload = data.get("payload", {})
+
+                # Merge into existing metrics so that an environment telemetry packet
+                # (which has no battery/voltage fields) never zeros out previously stored values.
+                metrics: Dict[str, Any] = node.get("deviceMetrics") or {}
+
+                battery_level = payload.get("battery_level")
+                voltage = payload.get("voltage")
+                # Only update battery/voltage when the field is explicitly present in the payload
+                if battery_level is not None:
+                    metrics["batteryLevel"] = int(battery_level)
+                if voltage is not None:
+                    metrics["voltage"] = float(voltage)
+
+                # These fields default to 0 in most payloads; only write when present
+                if "channel_utilization" in payload:
+                    metrics["channelUtilization"] = float(payload["channel_utilization"])
+                if "air_util_tx" in payload:
+                    metrics["airUtilTx"] = float(payload["air_util_tx"])
+                if "uptime_seconds" in payload:
+                    metrics["uptimeSeconds"] = int(payload["uptime_seconds"])
+
+                node["deviceMetrics"] = metrics
+
+                # Optional signal quality
+                rssi = data.get("rssi")
+                snr = data.get("snr")
+                if rssi is not None:
+                    node["mqtt_rssi"] = rssi
+                if snr is not None:
+                    node["mqtt_snr"] = snr
+
+            elif msg_type == "position":
+                payload = data.get("payload", {})
+                lat = payload.get("latitude_i") or payload.get("latitude")
+                lon = payload.get("longitude_i") or payload.get("longitude")
+                if lat is not None and lon is not None:
+                    node["position"] = {"latitude": lat / 1e7 if abs(lat) > 180 else lat,
+                                        "longitude": lon / 1e7 if abs(lon) > 180 else lon}
+
+            elif msg_type == "nodeinfo":
+                payload = data.get("payload", {})
+                long_name = payload.get("longname") or payload.get("long_name")
+                short_name = payload.get("shortname") or payload.get("short_name")
+                hw_model = payload.get("hw_model") or payload.get("hwModel")
+
+                # nodeinfo can describe a *different* node than the one that forwarded it.
+                # Use the payload `id` field (e.g. "!a0cb231c") when present; fall back to node_id.
+                described_id = ""
+                pid = payload.get("id", "")
+                if pid:
+                    described_id = str(pid).strip().lower()
+                    if not described_id.startswith("!"):
+                        try:
+                            described_id = f"!{int(described_id, 16):08x}"
+                        except ValueError:
+                            described_id = ""
+                if not described_id:
+                    described_id = node_id
+
+                # Ensure described node entry exists
+                if described_id not in self._nodes:
+                    self._nodes[described_id] = {
+                        "user": {
+                            "shortName": described_id[-4:].upper(),
+                            "longName": described_id,
+                            "hwModel": "MQTT",
+                        },
+                        "_mqtt_source": True,
+                        "mqtt_topic": topic_path,
+                        "lastHeard": int(data.get("timestamp", time.time())),
+                    }
+
+                described_node = self._nodes[described_id]
+                if long_name:
+                    described_node["user"]["longName"] = long_name
+                if short_name:
+                    described_node["user"]["shortName"] = short_name
+                if hw_model:
+                    described_node["user"]["hwModel"] = hw_model
+
+        if self._on_update:
+            try:
+                self._on_update()
+            except Exception:
+                pass

@@ -3,7 +3,7 @@ Main GUI module for MeshViewer using NiceGUI.
 """
 from nicegui import ui
 from typing import Optional, Dict, Any
-from meshviewer.connection import MeshConnectionManager
+from meshviewer.connection import MeshConnectionManager, MqttConnectionManager
 from meshviewer.interface import MeshInterface
 from meshviewer.config import ConfigManager
 from meshviewer.data_persistence import DataPersistence
@@ -28,6 +28,7 @@ class MeshViewerGUI:
         self.mesh_interface: Optional[MeshInterface] = None
         self.connected = False
         self.show_all_nodes = True
+        self.show_mqtt_nodes = True
         self.nodes_data: Dict[str, Any] = {}
         
         # Initialize data persistence
@@ -48,6 +49,28 @@ class MeshViewerGUI:
         self.auto_refresh_timer = None
         self.tabs = None
         self.battery_chart = None
+
+        # MQTT
+        self.mqtt_manager = MqttConnectionManager()
+        self.mqtt_manager.set_on_update(self._on_mqtt_update)
+        self.mqtt_connected = False
+        self.mqtt_nodes_data: Dict[str, Any] = {}
+        self.mqtt_status = None  # label set in setup_ui
+        self.mqtt_host_input = None
+        self.mqtt_user_input = None
+        self.mqtt_pass_input = None
+        self.mqtt_topic_input = None
+
+        # Pre-populate with last-known node state so the display isn't empty on restart
+        persisted = self.data_persistence.get_last_known_nodes()
+        if persisted:
+            self.mqtt_nodes_data = persisted
+            # Seed the MQTT manager's internal cache so live updates merge into persisted data
+            # rather than replacing it wholesale on the first packet
+            with self.mqtt_manager._lock:
+                for nid, node in persisted.items():
+                    if nid not in self.mqtt_manager._nodes:
+                        self.mqtt_manager._nodes[nid] = dict(node)
 
     def set_theme(self):
         """Set NiceGUI theme colors and mode using native theming."""
@@ -98,10 +121,24 @@ class MeshViewerGUI:
             ui.tab('Battery History', icon='battery_charging_full')
             autoresp_text = self.config.get_ui_text().get('autoresponse', {})
             autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
-            ui.tab(autoresp_tab, icon='smart_toy')
+            self._autoresp_tab = ui.tab(autoresp_tab, icon='smart_toy')
             automsg_text = self.config.get_ui_text().get('automessage', {})
             automsg_tab = automsg_text.get('tab_title', 'Auto Message')
-            ui.tab(automsg_tab, icon='schedule')
+            self._automsg_tab = ui.tab(automsg_tab, icon='schedule')
+
+        def _update_mesh_tab_state(_=None):
+            """Disable Auto Response/Message tabs when only connected via MQTT."""
+            mesh_only = self.connected  # True = Meshtastic connected
+            # disable = mqtt only (no meshtastic connection)
+            disable = (not self.connected) and self.mqtt_connected
+            for tab in (self._autoresp_tab, self._automsg_tab):
+                if disable:
+                    tab.props('disable')
+                    tab.tooltip('Not available for MQTT-only connections')
+                else:
+                    tab.props(remove='disable')
+
+        ui.timer(1.0, _update_mesh_tab_state)
         
         with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
             with ui.tab_panel('Network View'):
@@ -157,6 +194,42 @@ class MeshViewerGUI:
                 ui.button('Disconnect', on_click=self.disconnect).classes('flex-1').bind_visibility_from(self, 'connected')
             
             self.connection_status = ui.label(ui_text.get('disconnected_status', 'Disconnected')).classes('text-caption')
+
+        # ── MQTT connection card ────────────────────────────────────────
+        with ui.card().classes('w-full mt-2'):
+            ui.label('MQTT Connection').classes('text-h6')
+            with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
+                self.mqtt_host_input = ui.input(
+                    'Broker URL',
+                    value=self.config.get('mqtt.default_host', ''),
+                    placeholder='hostname or mqtt://host:1883',
+                ).classes('flex-1 min-w-0')
+            with ui.row().classes('w-full items-center gap-2'):
+                self.mqtt_user_input = ui.input(
+                    'Username',
+                    value=self.config.get('mqtt.default_username', ''),
+                ).classes('flex-1')
+                self.mqtt_pass_input = ui.input(
+                    'Password',
+                    value=self.config.get('mqtt.default_password', ''),
+                    password=True,
+                    password_toggle_button=True,
+                ).classes('flex-1')
+            with ui.row().classes('w-full items-center gap-2'):
+                self.mqtt_topic_input = ui.input(
+                    'Topic',
+                    value=self.config.get('mqtt.default_topic', '#'),
+                    placeholder='# (all topics)',
+                ).classes('flex-1')
+            with ui.row().classes('w-full gap-2'):
+                ui.button('Connect MQTT', on_click=self.connect_mqtt).classes('flex-1').bind_visibility_from(self, 'mqtt_connected', lambda v: not v)
+                ui.button('Disconnect MQTT', on_click=self.disconnect_mqtt).classes('flex-1').bind_visibility_from(self, 'mqtt_connected')
+            self.mqtt_status = ui.label('MQTT: Disconnected').classes('text-caption')
+
+            def try_mqtt_autoconnect():
+                if not self.mqtt_connected and self.config.get('mqtt.default_host', '').strip():
+                    self.connect_mqtt()
+            ui.timer(0.5, try_mqtt_autoconnect, once=True)
     
     def _setup_nodes_panel(self) -> None:
         """Setup the nodes display panel."""
@@ -207,6 +280,7 @@ class MeshViewerGUI:
                 self.nodes_title = ui.label(ui_text.get('title_favorites', 'Favourite Nodes')).classes('text-h6')
                 self.nodes_title.bind_text_from(self, 'show_all_nodes', lambda v: ui_text.get('title_all', 'All Mesh Nodes') if v else ui_text.get('title_favorites', 'Favourite Nodes'))
                 self.show_all_toggle = ui.checkbox('Show all Nodes', value=False).bind_value(self, 'show_all_nodes').on('update:model-value', lambda e: self.refresh_nodes())
+                ui.checkbox('Include MQTT', value=True).bind_value(self, 'show_mqtt_nodes').on('update:model-value', lambda e: self.refresh_nodes())
             
             self.nodes_container = ui.column().classes('w-full')
             self.refresh_nodes_button = ui.button('Refresh', on_click=self.refresh_nodes).bind_visibility_from(self, 'connected')
@@ -492,41 +566,142 @@ class MeshViewerGUI:
         self.connection_status.text = ui_text.get('disconnected_status', 'Disconnected')
         self.connection_status.classes('text-gray')
         self._clear_nodes_display()
+
+    # ── MQTT ──────────────────────────────────────────────────────────────
+
+    def connect_mqtt(self) -> None:
+        """Connect to the MQTT broker."""
+        url = self.mqtt_host_input.value.strip()
+        if not url:
+            if self.mqtt_status:
+                self.mqtt_status.text = 'MQTT: Enter broker URL'
+            return
+        username = self.mqtt_user_input.value.strip()
+        password = self.mqtt_pass_input.value
+        topic = self.mqtt_topic_input.value.strip() or '#'
+
+        ok = self.mqtt_manager.connect(url, username, password, topic)
+        if ok:
+            self.mqtt_connected = True
+            if self.mqtt_status:
+                self.mqtt_status.text = f'MQTT: Connecting to {url} …'
+            # Poll for actual connection status
+            import asyncio
+
+            async def _wait_connected():
+                for _ in range(20):
+                    await asyncio.sleep(0.5)
+                    if self.mqtt_manager.is_connected():
+                        if self.mqtt_status:
+                            self.mqtt_status.text = f'MQTT: Connected to {url} [{topic}]'
+                        return
+                if not self.mqtt_manager.is_connected():
+                    if self.mqtt_status:
+                        self.mqtt_status.text = f'MQTT: Connection timeout'
+                    self.mqtt_connected = False
+
+            import asyncio
+            asyncio.ensure_future(_wait_connected())
+        else:
+            self.mqtt_connected = False
+            if self.mqtt_status:
+                self.mqtt_status.text = 'MQTT: Connection failed (paho-mqtt not installed?)'
+
+    def disconnect_mqtt(self) -> None:
+        """Disconnect from the MQTT broker."""
+        self.mqtt_manager.disconnect()
+        self.mqtt_connected = False
+        self.mqtt_nodes_data = {}
+        if self.mqtt_status:
+            self.mqtt_status.text = 'MQTT: Disconnected'
+        self._update_nodes_display()
+
+    def _on_mqtt_update(self) -> None:
+        """Called by MqttConnectionManager when new data arrives (background thread)."""
+        self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+        # Schedule UI update on the main thread
+        try:
+            from nicegui import background_tasks
+            background_tasks.create(self._async_mqtt_refresh())
+        except Exception:
+            pass  # Will update on next manual/auto refresh
+
+    async def _async_mqtt_refresh(self) -> None:
+        """Async wrapper to update nodes display from MQTT data."""
+        self._update_nodes_display()
     
     def refresh_nodes(self) -> None:
         """Refresh the nodes display."""
-        if not self.connected or not self.mesh_interface:
-            return
-        
-        # Refresh nodes data and force last heard updates
-        self.mesh_interface.refresh_nodes_data()
-        self.mesh_interface.detect_last_heard_changes()
-        self.mesh_interface.force_last_heard_update()
-        
-        self.nodes_data = self.mesh_interface.get_all_nodes_data()
-        
-        # Save data to persistence layer
-        self.data_persistence.save_nodes_data(self.nodes_data)
-        
+        if self.connected and self.mesh_interface:
+            # Refresh Meshtastic nodes data
+            self.mesh_interface.refresh_nodes_data()
+            self.mesh_interface.detect_last_heard_changes()
+            self.mesh_interface.force_last_heard_update()
+            self.nodes_data = self.mesh_interface.get_all_nodes_data()
+            # Save data to persistence layer
+            self.data_persistence.save_nodes_data(self.nodes_data)
+
+        # Always pull latest MQTT nodes
+        self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+
+        # Persist merged data (Meshtastic + MQTT) so battery history captures both
+        merged_for_persistence = {**self.nodes_data, **{
+            nid: n for nid, n in self.mqtt_nodes_data.items() if nid not in self.nodes_data
+        }}
+        if merged_for_persistence:
+            self.data_persistence.save_nodes_data(merged_for_persistence)
+
         self._update_nodes_display()
         # Update the node count display
         if hasattr(self, 'node_count_label'):
             self.node_count_label.update()
     
     def _update_nodes_display(self) -> None:
-        """Update the nodes display with current data."""
+        """Update the nodes display with current data (Meshtastic + MQTT merged)."""
         self.nodes_container.clear()
         ui_text = self.config.get_ui_text().get('nodes', {})
-        
-        if not self.nodes_data:
+
+        # Build merged view: Meshtastic nodes first, then MQTT-only nodes
+        all_nodes: Dict[str, Any] = {}
+        all_nodes.update(self.nodes_data)        # Meshtastic nodes
+        for node_id, node in self.mqtt_nodes_data.items():
+            if node_id not in all_nodes:
+                all_nodes[node_id] = node
+            else:
+                # Node exists in both — use the source with the more recent lastHeard for badge
+                merged = all_nodes[node_id]
+                mqtt_last = node.get('lastHeard', 0) or 0
+                mesh_last = merged.get('lastHeard', 0) or 0
+                if mqtt_last > mesh_last:
+                    # MQTT heard this node more recently
+                    merged['_mqtt_source'] = True
+                    merged['lastHeard'] = mqtt_last
+                else:
+                    # Meshtastic is more recent — remove MQTT source badge
+                    merged.pop('_mqtt_source', None)
+                merged.pop('_from_persistence', None)
+
+        if not all_nodes:
             with self.nodes_container:
                 ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
             return
-        
-        for node_id, node in self.nodes_data.items():
-            if not self.show_all_nodes and 'isFavorite' not in node.keys():
+
+        thirty_days_ago = int(time.time()) - 30 * 86400
+
+        for node_id, node in all_nodes.items():
+            # Skip nodes not heard in the last 30 days
+            last_heard = int((node or {}).get('lastHeard') or 0)
+            if last_heard > 0 and last_heard < thirty_days_ago:
                 continue
-            
+
+            # Skip MQTT nodes when the toggle is off
+            is_mqtt = node.get('_mqtt_source', False)
+            is_persisted = node.get('_from_persistence', False)
+            if (is_mqtt or (is_persisted and node_id not in self.nodes_data)) and not self.show_mqtt_nodes:
+                continue
+
+            if not self.show_all_nodes and 'isFavorite' not in node and not is_mqtt and not is_persisted:
+                continue
             with self.nodes_container:
                 self._create_node_card(node_id, node)
 
@@ -566,7 +741,13 @@ class MeshViewerGUI:
         short_name = user.get('shortName') or f"!{node_id[-8:]}"
         long_name = user.get('longName') or node_id
         hw_model = user.get('hwModel') or ui_text.get('unknown_hw', 'Unknown')
-        
+        is_mqtt = node.get('_mqtt_source', False)  # live MQTT packet received
+        is_bridge = node.get('_is_bridge', False)
+        is_persisted_only = node.get('_from_persistence', False) and not is_mqtt
+        mqtt_topic = node.get('mqtt_topic', '')
+        # Abbreviated topic: last 3 segments for the compact header
+        topic_short = '/'.join(mqtt_topic.split('/')[-3:]) if mqtt_topic else ''
+
         with ui.card().classes('w-full mb-1 py-1'):
             bg_color, font_color = self.get_nodechip_colour(node_id)
             label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
@@ -574,10 +755,19 @@ class MeshViewerGUI:
             with ui.expansion(value=False).classes('w-full') as exp:
                 with exp.add_slot('header'):  # Visible all the time
                     with ui.row().classes('w-full items-center justify-between'):
-                        with ui.row().classes('items-left'):
-                            with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
-                                ui.label(short_name).classes(label_classes).style(f'color: {font_color};')
-                            ui.label(long_name).classes('text-h6')
+                        with ui.column().classes('items-start gap-0'):
+                            with ui.row().classes('items-center gap-1'):
+                                with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
+                                    ui.label(short_name).classes(label_classes).style(f'color: {font_color};')
+                                ui.label(long_name).classes('text-h6')
+                                if is_bridge:
+                                    ui.html('<span title="MQTT Bridge">🌉</span>').classes('text-lg')
+                                elif is_mqtt:
+                                    ui.html('<span title="MQTT node">📡</span>').classes('text-sm')
+                                elif is_persisted_only:
+                                    ui.html('<span title="Cached from last session">💾</span>').classes('text-sm opacity-50')
+                            if is_mqtt and topic_short:
+                                ui.label(topic_short).classes('text-caption font-mono text-blue-300 ml-2')
                         with ui.row().classes('items-right'):
                             self.render_last_heard(node)
                             if 'deviceMetrics' in node:
@@ -585,14 +775,35 @@ class MeshViewerGUI:
 
 
                 # The expansion content is the detailed view
-                with ui.row().classes('w-full items-center justify-between'):
+                with ui.row().classes('w-full items-center justify-between flex-wrap gap-1'):
                     if 'deviceMetrics' in node:
-                        uptime_hours = self.mesh_interface.get_uptime(node, asString = False)
+                        metrics = node['deviceMetrics']
+                        uptime_s = metrics.get('uptimeSeconds', 0)
+                        uptime_hours = uptime_s / 3600 if uptime_s else 0
+                        if self.mesh_interface and not node.get('_mqtt_source') and not node.get('_from_persistence'):
+                            uptime_hours = self.mesh_interface.get_uptime(node, asString=False)
                         ui.label(f"up {uptime_hours:4.1f} hrs").classes('text-sm')
-                        channel_util = node.get('deviceMetrics', {}).get('channelUtilization', 0.0)
+                        channel_util = metrics.get('channelUtilization', 0.0)
                         ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption')
                     ui.label(f"{ui_text.get('hw_label', 'HW')}: {hw_model}").classes('text-caption')
                     ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption')
+                    if is_mqtt:
+                        badge = '🌉 MQTT Bridge' if is_bridge else '📡 MQTT'
+                        with ui.column().classes('w-full gap-0 mt-1'):
+                            ui.label(badge).classes('text-caption text-blue-400 font-bold')
+                            if mqtt_topic:
+                                ui.label(mqtt_topic).classes('text-caption font-mono text-gray-400')
+                            rssi = node.get('mqtt_rssi')
+                            snr = node.get('mqtt_snr')
+                            if rssi is not None or snr is not None:
+                                sig = ''
+                                if rssi is not None:
+                                    sig += f'RSSI: {rssi} dBm'
+                                if snr is not None:
+                                    sig += ('  ' if sig else '') + f'SNR: {snr} dB'
+                                ui.label(sig).classes('text-caption text-gray-500')
+                    elif is_persisted_only:
+                        ui.label('💾 Cached — awaiting live data').classes('text-caption text-gray-500 mt-1')
 
 
     def _clear_nodes_display(self) -> None:
@@ -606,7 +817,13 @@ class MeshViewerGUI:
             self.node_count_label.update()
 
     def render_battery_string(self, node, node_id: str = ""):
-        battery_level, voltage, is_charging = self.mesh_interface.get_node_battery_status(node, asString = False)
+        if self.mesh_interface and not node.get('_mqtt_source') and not node.get('_from_persistence'):
+            battery_level, voltage, is_charging = self.mesh_interface.get_node_battery_status(node, asString=False)
+        else:
+            metrics = node.get('deviceMetrics', {})
+            battery_level = int(metrics.get('batteryLevel', 0))
+            voltage = float(metrics.get('voltage', 0.0))
+            is_charging = battery_level == 101
         if is_charging:
             bat_str = " Chg"
         else:

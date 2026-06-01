@@ -79,6 +79,13 @@ connection:
   default_tcp_host: "192.168.0.113"
   default_tcp_port: 4403
 
+# MQTT Connection Settings
+mqtt:
+  default_host: ""           # e.g. mqtt://192.168.0.10 or just 192.168.0.10:1883
+  default_username: ""
+  default_password: ""
+  default_topic: "#"          # Subscribe to all topics by default
+
 # Node Activity Settings
 nodes:
   active_threshold_hours: 3
