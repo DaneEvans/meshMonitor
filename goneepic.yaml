@@ -1,0 +1,106 @@
+# MeshViewer Configuration File
+# This file contains configurable text and theme settings for the GUI
+
+# Application Settings
+app:
+  title: "GoneEpic MeshViewer"
+  subtitle: "Meshtastic Network Monitor"
+  page_title: "GoneEpic MeshViewer - Meshtastic Network Monitor"
+  logo_path: "assets/M-PWRD.png"
+  contactname: "Site by Dane Evans"
+  contactsite: "https://daneevans.github.io/meshMonitor/"
+
+
+# Theme Configuration
+theme:
+  colors:
+    primary: "#2c2d3c"
+    secondary: "#234d20"
+    accent: "#c9df8a"
+    positive: "#21BA45"
+    negative: "#C10015"
+  # dark_mode: true
+
+# UI Text Labels
+ui_text:
+  connection:
+    title: "Connection"
+    disconnected_status: "Disconnected"
+    connected_tcp_status: "Connected via TCP to {host}:{port}"
+    connected_serial_status: "Connected via Serial on {port}"
+    connection_failed_tcp: "TCP connection failed"
+    connection_failed_serial: "Serial connection failed"
+  
+  nodes:
+    title_favorites: "Favourite Nodes"
+    title_all: "All Mesh Nodes"
+    no_nodes_found: "No nodes found"
+    not_connected: "Not connected"
+    channel_util_label: "Channel Util"
+    hw_label: "HW"
+    user_id_label: "User ID"
+
+  autoresponse:
+    tab_title: "Auto Response"
+    title: "Auto Response"
+    subtitle: "Autoresponse to messages on Secondary Channels. Session-only settings (won’t persist after reboot)."
+    enable_label: "Enable auto react"
+    emoji_label: "Tapback emoji"
+
+    status_prefix: "Status"
+    status_connected: "connected"
+    status_not_connected: "not connected"
+    status_auto_react: "auto react"
+    status_emoji: "emoji"
+    status_on: "ON"
+    status_off: "OFF"
+
+  automessage:
+    tab_title: "Auto Message"
+    title: "Auto Message"
+    subtitle: "Send scheduled messages. Session-only overrides (changes won’t persist after reboot). Use the config file for defaults."
+    enable_label: "Enable auto messages"
+    add_label: "Add message"
+    interval_label: "Interval (mins)"
+    channel_label: "Channel"
+    message_label: "Message"
+    delete_label: "Delete"
+
+    status_prefix: "Status"
+    status_connected: "connected"
+    status_not_connected: "not connected"
+    status_auto_message: "auto message"
+    status_messages: "messages"
+    status_on: "ON"
+    status_off: "OFF"
+
+# Default Connection Settings
+connection:
+  default_tcp_host: "192.168.0.113"
+  default_tcp_port: 4403
+
+# MQTT Connection Settings
+mqtt:
+  default_host: "mqtt.goneepic.com"           # e.g. mqtt://192.168.0.10 or just 192.168.0.10:1883
+  default_username: ""
+  default_password: ""
+  default_topic: "#"          # Subscribe to all topics by default
+
+# Node Activity Settings
+nodes:
+  active_threshold_hours: 3
+
+# Auto-reply / tapback settings
+notifications:
+  enable_auto_react: false
+  # auto_emoji: "🤖"
+  auto_emoji: "✅"
+
+# Scheduled messages (broadcast) on an interval
+automessage:
+  enabled: false
+  # enabled: true
+  messages:
+    - interval: 8    # minutes
+      channel: 0      # Meshtastic channel index (0 = Primary)
+      msg: "ADLED GREEN"
