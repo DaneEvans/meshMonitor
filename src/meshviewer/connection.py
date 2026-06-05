@@ -666,6 +666,7 @@ class MqttConnectionManager:
         self._client = None
         self._connected = False
         self._nodes: Dict[str, Any] = {}  # sender_id -> node dict
+        self._neighbor_packets: List[Dict[str, Any]] = []  # raw neighborinfo packets (session)
         self._lock = threading.Lock()
         self._on_update: Optional[Callable] = None  # optional callback when nodes change
 
@@ -740,6 +741,37 @@ class MqttConnectionManager:
         """Return a snapshot of the current node data (thread-safe copy)."""
         with self._lock:
             return dict(self._nodes)
+
+    def get_neighbor_packets(self) -> List[Dict[str, Any]]:
+        """Return a snapshot of collected neighborinfo packets (thread-safe copy)."""
+        with self._lock:
+            return list(self._neighbor_packets)
+
+    def set_neighbor_packets(self, packets: List[Dict[str, Any]]) -> None:
+        """Restore previously collected neighborinfo packets."""
+        with self._lock:
+            self._neighbor_packets = self._dedupe_neighbor_packets(packets)
+
+    @staticmethod
+    def _neighbor_packet_key(packet: Dict[str, Any]) -> tuple:
+        """Build a stable key for deduplicating identical neighbour packets."""
+        reporter = packet.get("payload", {}).get("node_id", packet.get("from"))
+        timestamp = int(packet.get("timestamp", 0) or 0)
+        canonical = json.dumps(packet, sort_keys=True, separators=(",", ":"))
+        return (str(reporter), timestamp, canonical)
+
+    @classmethod
+    def _dedupe_neighbor_packets(cls, packets: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Deduplicate identical neighbour packets while preserving order."""
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for packet in packets:
+            key = cls._neighbor_packet_key(packet)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(packet)
+        return deduped
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -846,6 +878,16 @@ class MqttConnectionManager:
             # Latch bridge flag — once seen as bridge, keep it
             if is_bridge:
                 node["_is_bridge"] = True
+
+            # Collect neighbor packets for Neighbour map tab
+            if msg_type in ("neighborinfo", "neighbourinfo"):
+                packet = dict(data)
+                packet["_topic"] = topic_path
+                packet["_received_at"] = int(time.time())
+                packet_key = self._neighbor_packet_key(packet)
+                existing_keys = {self._neighbor_packet_key(existing) for existing in self._neighbor_packets}
+                if packet_key not in existing_keys:
+                    self._neighbor_packets.append(packet)
 
             # Telemetry payloads carry device metrics
             if msg_type == "telemetry":

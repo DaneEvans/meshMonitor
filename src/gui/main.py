@@ -7,6 +7,8 @@ from meshviewer.connection import MeshConnectionManager, MqttConnectionManager
 from meshviewer.interface import MeshInterface
 from meshviewer.config import ConfigManager
 from meshviewer.data_persistence import DataPersistence
+import json
+import math
 import time
 import plotly.graph_objects as go
 import socket
@@ -60,6 +62,13 @@ class MeshViewerGUI:
         self.mqtt_user_input = None
         self.mqtt_pass_input = None
         self.mqtt_topic_input = None
+        self.mqtt_reporters_container = None
+        self.neighbour_packets = []
+        self.neighbour_log_container = None
+        self.neighbour_map_container = None
+        self.neighbour_unknown_container = None
+        self.reporter_aliases: Dict[str, str] = self.data_persistence.get_reporter_aliases()
+        self._known_reporting_nodes: list[str] = []
 
         # Pre-populate with last-known node state so the display isn't empty on restart
         persisted = self.data_persistence.get_last_known_nodes()
@@ -71,6 +80,15 @@ class MeshViewerGUI:
                 for nid, node in persisted.items():
                     if nid not in self.mqtt_manager._nodes:
                         self.mqtt_manager._nodes[nid] = dict(node)
+
+        persisted_neighbours = self.data_persistence.get_neighbour_packets()
+        if persisted_neighbours:
+            self.neighbour_packets = persisted_neighbours
+            self.mqtt_manager.set_neighbor_packets(persisted_neighbours)
+            print(f"DEBUG: Loaded {len(persisted_neighbours)} persisted neighbour packets into mqtt_manager")
+
+        # Mark that persisted data has been loaded; will trigger display in setup_ui
+        self.persisted_data_loaded = True
 
     def set_theme(self):
         """Set NiceGUI theme colors and mode using native theming."""
@@ -119,6 +137,7 @@ class MeshViewerGUI:
         with ui.tabs().classes('w-full') as self.tabs:
             ui.tab('Network View', icon='network_check')
             ui.tab('Battery History', icon='battery_charging_full')
+            ui.tab('Neighbour map', icon='share')
             autoresp_text = self.config.get_ui_text().get('autoresponse', {})
             autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
             self._autoresp_tab = ui.tab(autoresp_tab, icon='smart_toy')
@@ -153,13 +172,23 @@ class MeshViewerGUI:
             
             with ui.tab_panel('Battery History'):
                 self._setup_battery_history_panel()
+
+            with ui.tab_panel('Neighbour map'):
+                self._setup_neighbour_map_panel()
             
             with ui.tab_panel(autoresp_tab):
                 self._setup_autoresponse_panel()
 
             with ui.tab_panel(automsg_tab):
                 self._setup_automessage_panel()
-            
+
+        # Defer display of persisted data until after event loop is initialized
+        if getattr(self, 'persisted_data_loaded', False):
+            def _trigger_initial_display():
+                if self.mqtt_nodes_data:
+                    self._update_nodes_display()
+                # Neighbour views will be displayed via _setup_neighbour_map_panel which calls _update_neighbour_views()
+            ui.timer(0.1, _trigger_initial_display, once=True)
 
     
     def _setup_connection_panel(self) -> None:
@@ -226,6 +255,13 @@ class MeshViewerGUI:
                 ui.button('Disconnect MQTT', on_click=self.disconnect_mqtt).classes('flex-1').bind_visibility_from(self, 'mqtt_connected')
             self.mqtt_status = ui.label('MQTT: Disconnected').classes('text-caption')
 
+            with ui.separator().classes('my-2'):
+                pass
+            ui.label('Reporting node nicknames').classes('text-subtitle2')
+            ui.label('Used in compact topic display: reported by <nickname>: prefix-channel').classes('text-caption text-gray-500')
+            self.mqtt_reporters_container = ui.column().classes('w-full gap-1')
+            self._refresh_mqtt_reporters_ui()
+
             def try_mqtt_autoconnect():
                 if not self.mqtt_connected and self.config.get('mqtt.default_host', '').strip():
                     self.connect_mqtt()
@@ -284,6 +320,7 @@ class MeshViewerGUI:
             
             self.nodes_container = ui.column().classes('w-full')
             self.refresh_nodes_button = ui.button('Refresh', on_click=self.refresh_nodes).bind_visibility_from(self, 'connected')
+
     
     def _setup_battery_history_panel(self) -> None:
         """Setup the battery history panel."""
@@ -512,6 +549,471 @@ class MeshViewerGUI:
             _render_rows()
             ui.timer(1.0, _refresh_status)
             _refresh_status()
+
+    def _setup_neighbour_map_panel(self) -> None:
+        """Setup Neighbour map tab with packet log and neighbor map sections."""
+        with ui.column().classes('w-full gap-4'):
+            with ui.row().classes('w-full gap-4 flex-col lg:flex-row items-start'):
+                with ui.card().classes('w-full lg:flex-1'):
+                    ui.label('map').classes('text-h6')
+                    ui.label('Latest reported neighbour links by node').classes('text-caption text-gray-500')
+                    self.neighbour_map_container = ui.column().classes('w-full gap-1')
+
+                with ui.card().classes('w-full lg:w-80'):
+                    ui.label('visible, but neighbours not known').classes('text-h6')
+                    ui.label('Last seen within 3 hours, and neither reports neighbours nor appears in any latest neighbour list').classes('text-caption text-gray-500')
+                    self.neighbour_unknown_container = ui.column().classes('w-full gap-1')
+
+            with ui.expansion('log', value=False).classes('w-full'):
+                ui.label('Collected neighbourinfo MQTT packets').classes('text-caption text-gray-500')
+                self.neighbour_log_container = ui.column().classes('w-full gap-1')
+
+        self._update_neighbour_views()
+
+    @staticmethod
+    def _parse_mqtt_topic(topic: str) -> Dict[str, str]:
+        """Parse MQTT topic into prefix/channel/reporter components when possible."""
+        raw = str(topic or '').strip().strip('/')
+        if not raw:
+            return {'prefix': '', 'channel': '', 'reporter': ''}
+
+        parts = [p for p in raw.split('/') if p]
+        reporter = parts[-1] if parts else ''
+        prefix = ''
+        channel = ''
+
+        # Pattern: <prefix>/<port>/json/<channel>/<reporter>
+        # Example: msh/ANZ/flamingo/2/json/CRS_INFRA/!a0cb10f8
+        for i in range(len(parts) - 3):
+            if parts[i].isdigit() and parts[i + 1].lower() == 'json':
+                prefix = '/'.join(parts[:i])
+                channel = parts[i + 2]
+                break
+
+        # Best-effort fallback when pattern differs
+        if not channel and len(parts) >= 2:
+            channel = parts[-2]
+        if not prefix and len(parts) >= 4:
+            prefix = '/'.join(parts[:-4])
+
+        return {'prefix': prefix, 'channel': channel, 'reporter': reporter}
+
+    def _get_reporter_name(self, reporter_id: str) -> str:
+        """Return reporter nickname when set, else raw reporter id."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return ''
+        alias = str(self.reporter_aliases.get(key, '') or '').strip()
+        return alias if alias else key
+
+    def _format_mqtt_topic_compact(self, topic: str) -> str:
+        """Build compact MQTT path display: 🌉 nickname nodeID: prefix-channel."""
+        parsed = self._parse_mqtt_topic(topic)
+        reporter_id = parsed.get('reporter', '')
+        alias = str(self.reporter_aliases.get(reporter_id, '') or '').strip()
+        prefix = parsed.get('prefix', '')
+        channel = parsed.get('channel', '')
+
+        prefix_channel = ''
+        if prefix and channel:
+            prefix_channel = f'{prefix}-{channel}'
+        elif prefix:
+            prefix_channel = prefix
+        elif channel:
+            prefix_channel = channel
+        else:
+            parts = [p for p in str(topic or '').split('/') if p]
+            prefix_channel = '/'.join(parts[-3:]) if parts else ''
+
+        if alias and reporter_id:
+            reporter_display = f'\U0001f309 {alias} {reporter_id}'
+        elif reporter_id:
+            reporter_display = f'\U0001f309 {reporter_id}'
+        else:
+            reporter_display = ''
+
+        if reporter_display and prefix_channel:
+            return f'{reporter_display}: {prefix_channel}'
+        return reporter_display or prefix_channel
+
+    def _collect_reporting_nodes(self) -> list[str]:
+        """Collect all known MQTT reporting node ids from topic paths."""
+        reporters = set()
+
+        for node in self.mqtt_nodes_data.values():
+            topic = str((node or {}).get('mqtt_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if reporter:
+                reporters.add(reporter)
+
+        for pkt in self.neighbour_packets:
+            topic = str((pkt or {}).get('_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if reporter:
+                reporters.add(reporter)
+
+        return sorted(reporters)
+
+    def _set_reporter_alias(self, reporter_id: str, alias_value: Any) -> None:
+        """Set/update nickname for a reporter node id and persist it."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return
+        alias = str(alias_value or '').strip()
+        old_alias = self.reporter_aliases.get(key, '')
+        if alias == old_alias:
+            return  # No change; skip save and re-render
+        if alias:
+            self.reporter_aliases[key] = alias
+        else:
+            self.reporter_aliases.pop(key, None)
+        self.data_persistence.save_reporter_aliases(self.reporter_aliases)
+        # Do NOT rebuild reporters UI here — that would destroy the input the user is typing in
+        self._update_nodes_display()
+
+    def _refresh_mqtt_reporters_ui(self, force: bool = False) -> None:
+        """Refresh MQTT settings section listing reporting nodes and nickname inputs."""
+        if self.mqtt_reporters_container is None:
+            return
+
+        reporters = self._collect_reporting_nodes()
+        if not force and reporters == self._known_reporting_nodes:
+            return
+        self._known_reporting_nodes = list(reporters)
+
+        self.mqtt_reporters_container.clear()
+        with self.mqtt_reporters_container:
+            if not reporters:
+                ui.label('No reporting nodes discovered yet').classes('text-caption text-gray-500')
+                return
+            for reporter in reporters:
+                with ui.row().classes('w-full items-center gap-2'):
+                    ui.label(reporter).classes('text-caption font-mono w-40')
+                    # on_change gives ValueChangeEventArguments with a reliable .value
+                    ui.input(
+                        'Nickname',
+                        value=self.reporter_aliases.get(reporter, ''),
+                        placeholder='optional nickname',
+                        on_change=lambda e, rid=reporter: self._set_reporter_alias(rid, e.value)
+                    ).classes('flex-1')
+
+    @staticmethod
+    def _to_node_id(value: Any) -> str:
+        """Convert numeric or string node identifier to canonical !xxxxxxxx form when possible."""
+        if value is None:
+            return ''
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if not s:
+                return ''
+            if s.startswith('!'):
+                return s
+            try:
+                return f"!{int(s):08x}"
+            except Exception:
+                return s
+        try:
+            return f"!{int(value):08x}"
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _format_time_ago(timestamp: int) -> str:
+        """Return a compact relative time string for a unix timestamp."""
+        if timestamp <= 0:
+            return 'unknown'
+        delta = max(0, int(time.time()) - int(timestamp))
+        if delta < 60:
+            return f'{delta}s ago'
+        if delta < 3600:
+            return f'{delta // 60}m ago'
+        if delta < 86400:
+            hours = delta // 3600
+            minutes = (delta % 3600) // 60
+            return f'{hours}h {minutes}m ago' if minutes else f'{hours}h ago'
+        days = delta // 86400
+        hours = (delta % 86400) // 3600
+        return f'{days}d {hours}h ago' if hours else f'{days}d ago'
+
+    def _update_neighbour_views(self) -> None:
+        """Refresh Neighbour map tab sections from collected MQTT packets."""
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+        print(f"DEBUG: _update_neighbour_views retrieved {len(self.neighbour_packets)} packets from mqtt_manager")
+        self._refresh_mqtt_reporters_ui()
+
+        if self.neighbour_log_container is None or self.neighbour_map_container is None or self.neighbour_unknown_container is None:
+            return
+
+        # ---- log section ----
+        self.neighbour_log_container.clear()
+        with self.neighbour_log_container:
+            total = len(self.neighbour_packets)
+            ui.label(f'Packets collected: {total}').classes('text-caption text-gray-500')
+            if total == 0:
+                ui.label('No neighbour packets yet').classes('text-gray-500')
+            else:
+                # Keep UI manageable while still collecting all in memory
+                recent_packets = self.neighbour_packets[-200:]
+                if total > len(recent_packets):
+                    ui.label(f'Showing latest {len(recent_packets)} packets').classes('text-caption text-gray-500')
+                for pkt in reversed(recent_packets):
+                    ts = pkt.get('timestamp', pkt.get('_received_at', ''))
+                    node_from = self._to_node_id(pkt.get('from'))
+                    topic = pkt.get('_topic', '')
+                    with ui.column().classes('w-full rounded border border-gray-300 p-2 bg-gray-50 dark:bg-gray-900'):
+                        ui.label(f'{ts}  {node_from}  {topic}').classes('text-caption font-mono')
+                        ui.label(json.dumps(pkt, separators=(',', ':'), sort_keys=True)).classes('text-caption font-mono break-all')
+
+        # ---- map section ----
+        self.neighbour_map_container.clear()
+        edges: Dict[tuple, Dict[str, Any]] = {}
+        reporter_nodes = set()
+        latest_packets_by_reporter: Dict[str, Dict[str, Any]] = {}
+        for pkt in self.neighbour_packets:
+            if (pkt.get('type') or '').lower() not in ('neighborinfo', 'neighbourinfo'):
+                continue
+            payload = pkt.get('payload') or {}
+            reporter = self._to_node_id(payload.get('node_id') or pkt.get('from'))
+            if not reporter:
+                continue
+            reporter_nodes.add(reporter)
+            ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
+            current_latest = latest_packets_by_reporter.get(reporter)
+            current_latest_ts = int((current_latest or {}).get('timestamp') or (current_latest or {}).get('_received_at') or 0)
+            if current_latest is None or ts >= current_latest_ts:
+                latest_packets_by_reporter[reporter] = pkt
+
+        for reporter, pkt in latest_packets_by_reporter.items():
+            payload = pkt.get('payload') or {}
+            ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
+            for n in payload.get('neighbors') or []:
+                neighbour = self._to_node_id(n.get('node_id'))
+                if not neighbour:
+                    continue
+                key = (reporter, neighbour)
+                edges[key] = {
+                    'count': 1,
+                    'snr': n.get('snr'),
+                    'last_ts': ts,
+                }
+
+        # ---- unknown neighbour section ----
+        self.neighbour_unknown_container.clear()
+        three_hours_ago = int(time.time()) - (3 * 3600)
+        visible_nodes: Dict[str, Any] = dict(self.nodes_data)
+        for node_id, node in self.mqtt_nodes_data.items():
+            if node_id not in visible_nodes:
+                visible_nodes[node_id] = node
+
+        known_neighbour_nodes = set(edges_node for edge in edges for edges_node in edge) | set(latest_packets_by_reporter.keys())
+        unknown_nodes = []
+        for node_id, node in visible_nodes.items():
+            last_heard = int((node or {}).get('lastHeard') or 0)
+            if last_heard < three_hours_ago:
+                continue
+            if node_id in known_neighbour_nodes:
+                continue
+            user = node.get('user') or {}
+            name = user.get('longName') or user.get('shortName') or node_id
+            unknown_nodes.append((last_heard, node_id, name))
+
+        unknown_nodes.sort(reverse=True)
+        with self.neighbour_unknown_container:
+            ui.label(f'Nodes: {len(unknown_nodes)}').classes('text-caption text-gray-500')
+            if not unknown_nodes:
+                ui.label('None').classes('text-gray-500')
+            else:
+                for last_heard, node_id, name in unknown_nodes:
+                    ui.label(f'{name} ({node_id})').classes('text-caption')
+                    ui.label(f'last heard: {self._format_time_ago(last_heard)}').classes('text-caption text-gray-500 -mt-2 mb-1')
+
+        with self.neighbour_map_container:
+            node_ids = sorted({node_id for edge in edges for node_id in edge} | set(latest_packets_by_reporter.keys()))
+            ui.label(f'Links discovered: {len(edges)} | Nodes: {len(node_ids)}').classes('text-caption text-gray-500')
+            if not edges:
+                ui.label('No neighbour links yet').classes('text-gray-500')
+            else:
+                width = 960
+                height = 720
+                padding = 90
+
+                # ── Fruchterman-Reingold force-directed layout ───────────────
+                n = len(node_ids)
+                node_index = {nid: i for i, nid in enumerate(node_ids)}
+                adj_sets: list = [set() for _ in range(n)]
+                for (rn, nn) in edges:
+                    ri, ni = node_index.get(rn, -1), node_index.get(nn, -1)
+                    if ri >= 0 and ni >= 0:
+                        adj_sets[ri].add(ni)
+                        adj_sets[ni].add(ri)
+
+                # Deterministic circular seed
+                cx0, cy0 = width / 2.0, height / 2.0
+                r0 = min(width - 2 * padding, height - 2 * padding) * 0.38
+                pos_x = [cx0 + r0 * math.cos((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
+                pos_y = [cy0 + r0 * math.sin((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
+
+                k_fd = math.sqrt((width - 2 * padding) * (height - 2 * padding) / max(n, 1))
+                iters = 300
+                for it in range(iters):
+                    fx = [0.0] * n
+                    fy = [0.0] * n
+                    # Repulsion between every pair
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            dx = pos_x[i] - pos_x[j]
+                            dy = pos_y[i] - pos_y[j]
+                            dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                            rep = k_fd * k_fd / dist
+                            ux, uy = dx / dist, dy / dist
+                            fx[i] += ux * rep;  fy[i] += uy * rep
+                            fx[j] -= ux * rep;  fy[j] -= uy * rep
+                    # Attraction along edges
+                    for i in range(n):
+                        for j in adj_sets[i]:
+                            if j > i:
+                                dx = pos_x[j] - pos_x[i]
+                                dy = pos_y[j] - pos_y[i]
+                                dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                                att = dist * dist / k_fd
+                                ux, uy = dx / dist, dy / dist
+                                fx[i] += ux * att;  fy[i] += uy * att
+                                fx[j] -= ux * att;  fy[j] -= uy * att
+                    # Apply displacement with cooling
+                    temp = max(5.0, (width / 8.0) * (1.0 - it / iters))
+                    for i in range(n):
+                        mag = max((fx[i] * fx[i] + fy[i] * fy[i]) ** 0.5, 1e-9)
+                        disp = min(mag, temp)
+                        pos_x[i] = max(padding, min(width - padding, pos_x[i] + fx[i] / mag * disp))
+                        pos_y[i] = max(padding, min(height - padding, pos_y[i] + fy[i] / mag * disp))
+
+                node_positions: Dict[str, tuple] = {node_ids[i]: (pos_x[i], pos_y[i]) for i in range(n)}
+
+                def _escape(text: str) -> str:
+                    return (
+                        str(text)
+                        .replace('&', '&amp;')
+                        .replace('<', '&lt;')
+                        .replace('>', '&gt;')
+                        .replace('"', '&quot;')
+                    )
+
+                svg_parts = [
+                    f'<svg viewBox="0 0 {width} {height}" class="w-full" style="min-height: 720px; background: rgba(128,128,128,0.06); border-radius: 12px;">',
+                    '<defs>',
+                    '<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">',
+                    '<polygon points="0 0, 10 3.5, 0 7" fill="#64748b"></polygon>',
+                    '</marker>',
+                    '<marker id="arrowhead-rev" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">',
+                    '<polygon points="10 0, 0 3.5, 10 7" fill="#64748b"></polygon>',
+                    '</marker>',
+                    '</defs>',
+                ]
+
+                # Build bidirectional edge pairs to avoid duplicate lines
+                processed_edges = set()
+
+                for (reporter, neighbour), edge in edges.items():
+                    pair = tuple(sorted([reporter, neighbour]))
+                    if pair in processed_edges:
+                        continue
+                    processed_edges.add(pair)
+
+                    x1, y1 = node_positions[neighbour]
+                    x2, y2 = node_positions[reporter]
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    length = max((dx * dx + dy * dy) ** 0.5, 1)
+                    node_radius = 28
+                    start_x = x1 + (dx / length) * node_radius
+                    start_y = y1 + (dy / length) * node_radius
+                    end_x = x2 - (dx / length) * node_radius
+                    end_y = y2 - (dy / length) * node_radius
+
+                    snr_forward = edge['snr']
+                    snr_forward_txt = f'{snr_forward}dB' if snr_forward is not None else 'n/a'
+
+                    # Check for reverse direction
+                    reverse_key = (neighbour, reporter)
+                    has_reverse = reverse_key in edges
+                    snr_reverse = edges[reverse_key]['snr'] if has_reverse else None
+                    snr_reverse_txt = f'{snr_reverse}dB' if snr_reverse is not None else 'n/a'
+
+                    title_txt = _escape(f'{neighbour} → {reporter}: {snr_forward_txt}')
+                    if has_reverse:
+                        title_txt += _escape(f' | {reporter} → {neighbour}: {snr_reverse_txt}')
+
+                    # Draw single line with appropriate arrowheads
+                    if has_reverse:
+                        # Bidirectional: both arrowheads
+                        svg_parts.append(
+                            f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-start="url(#arrowhead-rev)" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                        )
+                    else:
+                        # Unidirectional: single arrowhead at the end
+                        svg_parts.append(
+                            f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                        )
+
+                    # Place forward SNR label at 1/3 point
+                    label_x_1 = start_x + (end_x - start_x) * 0.33
+                    label_y_1 = start_y + (end_y - start_y) * 0.33
+                    svg_parts.append(
+                        f'<text x="{label_x_1:.1f}" y="{label_y_1 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_forward_txt)}</text>'
+                    )
+
+                    # If bidirectional, place reverse SNR label at 2/3 point
+                    if has_reverse:
+                        label_x_2 = start_x + (end_x - start_x) * 0.67
+                        label_y_2 = start_y + (end_y - start_y) * 0.67
+                        svg_parts.append(
+                            f'<text x="{label_x_2:.1f}" y="{label_y_2 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_reverse_txt)}</text>'
+                        )
+
+                for node_id, (x, y) in node_positions.items():
+                    is_reporter = node_id in reporter_nodes
+                    fill, font_color = self.get_nodechip_colour(node_id)
+                    stroke = 'white' if is_reporter else '#94a3b8'
+                    stroke_width = 3 if is_reporter else 2
+
+                    nd = visible_nodes.get(node_id) or {}
+                    usr = nd.get('user') or {}
+                    short_name = (usr.get('shortName') or node_id[-4:]).upper()
+                    long_name = usr.get('longName') or ''
+
+                    inner_label = _escape(short_name[:5])
+                    name_label = _escape(long_name[:16]) if long_name else ''
+                    title_txt = _escape(f'{node_id} | {long_name or short_name} | reporter={is_reporter}')
+
+                    svg_parts.append(
+                        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="28" fill="{fill}" stroke="{stroke}" stroke-width="{stroke_width}"><title>{title_txt}</title></circle>'
+                    )
+                    if is_reporter:
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y - 3:.1f}" text-anchor="middle" fill="{font_color}" font-size="16">🧭</text>'
+                        )
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y + 16:.1f}" text-anchor="middle" fill="{font_color}" font-size="10">{inner_label}</text>'
+                        )
+                    else:
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" fill="{font_color}" font-size="12">{inner_label}</text>'
+                        )
+                    if name_label:
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y + 44:.1f}" text-anchor="middle" fill="#94a3b8" font-size="10">{name_label}</text>'
+                        )
+
+                svg_parts.append('</svg>')
+                ui.html(''.join(svg_parts)).classes('w-full')
+
+                with ui.row().classes('w-full flex-wrap gap-x-6 gap-y-1 mt-2'):
+                    ui.label('🧭 = node has reported neighbour info').classes('text-caption text-gray-500')
+                    ui.label('Arrow direction = neighbour to reporter').classes('text-caption text-gray-500')
     
     def connect_tcp(self) -> None:
         """Connect via TCP."""
@@ -612,13 +1114,16 @@ class MeshViewerGUI:
         self.mqtt_manager.disconnect()
         self.mqtt_connected = False
         self.mqtt_nodes_data = {}
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
         if self.mqtt_status:
             self.mqtt_status.text = 'MQTT: Disconnected'
         self._update_nodes_display()
+        self._update_neighbour_views()
 
     def _on_mqtt_update(self) -> None:
         """Called by MqttConnectionManager when new data arrives (background thread)."""
         self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
         # Schedule UI update on the main thread
         try:
             from nicegui import background_tasks
@@ -628,7 +1133,24 @@ class MeshViewerGUI:
 
     async def _async_mqtt_refresh(self) -> None:
         """Async wrapper to update nodes display from MQTT data."""
+        # Persist MQTT updates even when no manual refresh occurs.
+        merged_for_persistence = dict(self.nodes_data)
+        for nid, mqtt_node in self.mqtt_nodes_data.items():
+            if nid not in merged_for_persistence:
+                merged_for_persistence[nid] = mqtt_node
+            else:
+                existing = merged_for_persistence[nid]
+                mqtt_last = int(mqtt_node.get('lastHeard', 0) or 0)
+                existing_last = int(existing.get('lastHeard', 0) or 0)
+                if mqtt_last > existing_last:
+                    merged_for_persistence[nid] = {**existing, **mqtt_node, 'lastHeard': mqtt_last}
+        if merged_for_persistence:
+            self.data_persistence.save_nodes_data(merged_for_persistence)
+        self.data_persistence.save_neighbour_packets(self.neighbour_packets)
+
+        self._refresh_mqtt_reporters_ui()
         self._update_nodes_display()
+        self._update_neighbour_views()
     
     def refresh_nodes(self) -> None:
         """Refresh the nodes display."""
@@ -643,15 +1165,26 @@ class MeshViewerGUI:
 
         # Always pull latest MQTT nodes
         self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+        self._refresh_mqtt_reporters_ui()
 
         # Persist merged data (Meshtastic + MQTT) so battery history captures both
-        merged_for_persistence = {**self.nodes_data, **{
-            nid: n for nid, n in self.mqtt_nodes_data.items() if nid not in self.nodes_data
-        }}
+        merged_for_persistence = dict(self.nodes_data)
+        for nid, mqtt_node in self.mqtt_nodes_data.items():
+            if nid not in merged_for_persistence:
+                merged_for_persistence[nid] = mqtt_node
+            else:
+                existing = merged_for_persistence[nid]
+                mqtt_last = int(mqtt_node.get('lastHeard', 0) or 0)
+                existing_last = int(existing.get('lastHeard', 0) or 0)
+                if mqtt_last > existing_last:
+                    merged_for_persistence[nid] = {**existing, **mqtt_node, 'lastHeard': mqtt_last}
         if merged_for_persistence:
             self.data_persistence.save_nodes_data(merged_for_persistence)
+        self.data_persistence.save_neighbour_packets(self.neighbour_packets)
 
         self._update_nodes_display()
+        self._update_neighbour_views()
         # Update the node count display
         if hasattr(self, 'node_count_label'):
             self.node_count_label.update()
@@ -745,8 +1278,8 @@ class MeshViewerGUI:
         is_bridge = node.get('_is_bridge', False)
         is_persisted_only = node.get('_from_persistence', False) and not is_mqtt
         mqtt_topic = node.get('mqtt_topic', '')
-        # Abbreviated topic: last 3 segments for the compact header
-        topic_short = '/'.join(mqtt_topic.split('/')[-3:]) if mqtt_topic else ''
+        # Compact topic format: reported by <reporter>: <prefix>-<channel>
+        topic_short = self._format_mqtt_topic_compact(mqtt_topic) if mqtt_topic else ''
 
         with ui.card().classes('w-full mb-1 py-1'):
             bg_color, font_color = self.get_nodechip_colour(node_id)

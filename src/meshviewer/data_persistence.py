@@ -23,6 +23,8 @@ class DataPersistence:
         self.data_dir = data_dir
         self.csv_file = os.path.join(data_dir, "node_data.csv")
         self.json_file = os.path.join(data_dir, "node_data.json")
+        self.neighbour_packets_file = os.path.join(data_dir, "neighbour_packets.json")
+        self.reporter_aliases_file = os.path.join(data_dir, "reporter_aliases.json")
         
         # Create data directory if it doesn't exist
         os.makedirs(data_dir, exist_ok=True)
@@ -32,6 +34,8 @@ class DataPersistence:
         
         # Track previous uptime values to detect changes
         self._previous_uptimes = {}
+        # Track previous last-heard values so MQTT-only updates persist even when uptime is unchanged
+        self._previous_last_heard = {}
         
         # Load previous uptime values from existing data
         self._load_previous_uptimes()
@@ -61,10 +65,15 @@ class DataPersistence:
             # Get the most recent uptime for each node
             latest_data = df.groupby('node_id')['uptime_hours'].last()
             self._previous_uptimes = latest_data.to_dict()
+
+            # Get the most recent last_heard for each node
+            latest_last_heard = df.groupby('node_id')['last_heard'].last()
+            self._previous_last_heard = latest_last_heard.to_dict()
             
         except Exception as e:
             print(f"Warning: Could not load previous uptime values: {e}")
             self._previous_uptimes = {}
+            self._previous_last_heard = {}
     
     def save_nodes_data(self, nodes_data: Dict[str, Dict[str, Any]]) -> None:
         """
@@ -76,7 +85,11 @@ class DataPersistence:
         timestamp = int(time.time())
         timestamp_str = datetime.fromtimestamp(timestamp).isoformat()
         
-        # Check if we already have data for this timestamp to avoid duplicates
+        # CSV history is rate-limited, but JSON snapshots should still be written
+        # so MQTT-only/non-telemetry nodes survive restarts.
+        skip_csv_write = False
+
+        # Check if we already have recent CSV data to avoid duplicates
         if os.path.exists(self.csv_file):
             try:
                 existing_df = pd.read_csv(self.csv_file)
@@ -91,7 +104,7 @@ class DataPersistence:
                         time_diff = (current_ts - latest_existing_ts).total_seconds()
                         if time_diff < 240:
                             print(f"Data for timestamp {timestamp_str} is less than 4 minutes after previous ({latest_existing_ts}), skipping save")
-                            return
+                            skip_csv_write = True
             except Exception as e:
                 print(f"Warning: Could not check for existing data: {e}")
         
@@ -104,40 +117,60 @@ class DataPersistence:
         }
         
         for node_id, node in nodes_data.items():
-            # Skip nodes without device metrics
+            user_info = node.get('user', {})
+            short_name = user_info.get('shortName', 'Unknown')
+            long_name = user_info.get('longName', 'Unknown')
+            hw_model = user_info.get('hwModel', 'Unknown')
+            is_favorite = 'isFavorite' in node
+            last_heard = int(node.get('lastHeard', 0) or 0)
+
+            # JSON snapshot stores the latest known state for all nodes, even if they
+            # don't have telemetry/device metrics yet.
+            json_node = {
+                'user': {
+                    'shortName': short_name,
+                    'longName': long_name,
+                    'hwModel': hw_model,
+                },
+                'lastHeard': last_heard,
+                'isFavorite': is_favorite,
+            }
+            if 'deviceMetrics' in node:
+                json_node['deviceMetrics'] = dict(node.get('deviceMetrics') or {})
+            if 'mqtt_topic' in node:
+                json_node['mqtt_topic'] = node.get('mqtt_topic')
+            if '_is_bridge' in node:
+                json_node['_is_bridge'] = bool(node.get('_is_bridge'))
+            if 'position' in node:
+                json_node['position'] = node.get('position')
+            json_data['nodes'][node_id] = json_node
+
+            # Skip CSV history rows for nodes without device metrics
             if 'deviceMetrics' not in node:
                 continue
                 
             # Extract uptime and check if it has changed
             uptime_hours = node['deviceMetrics'].get('uptimeSeconds', 0) / 3600
             previous_uptime = self._previous_uptimes.get(node_id, 0)
+            previous_last_heard = int(self._previous_last_heard.get(node_id, 0) or 0)
             
             print(f"watchme: {uptime_hours}, {previous_uptime}")
             # Skip nodes that haven't changed their uptime (indicating they haven't updated telemetry.
             # Allow small float precision differences and optionally a force-write override in the future
             uptime_diff = abs(float(uptime_hours) - float(previous_uptime))
+            last_heard_changed = last_heard > previous_last_heard
             # Consider uptime the "same" if the change is less than 0.01 hour (36 seconds)
-            if uptime_diff < 0.01:
-                print(f'skipping writing to db for node {node_id} (uptime difference {uptime_diff:.4f} < 0.0001)')
+            if skip_csv_write or (uptime_diff < 0.01 and not last_heard_changed):
+                print(f'skipping writing to db for node {node_id} (uptime difference {uptime_diff:.4f} < 0.0001 and lastHeard unchanged)')
                 continue
             else:
-                print(f' writing to db for node {node_id} (uptime difference {uptime_diff:.4f} >= 0.0001)')            # Extract battery information
+                print(f' writing to db for node {node_id} (uptime difference {uptime_diff:.4f}, lastHeard changed={last_heard_changed})')            # Extract battery information
             battery_level = node['deviceMetrics'].get('batteryLevel', 0)
             voltage = node['deviceMetrics'].get('voltage', 0.0)
             is_charging = battery_level == 101
             
             # Extract other metrics
             channel_util = node['deviceMetrics'].get('channelUtilization', 0.0)
-            last_heard = node.get('lastHeard', 0)
-            
-            # Extract user information
-            user_info = node.get('user', {})
-            short_name = user_info.get('shortName', 'Unknown')
-            long_name = user_info.get('longName', 'Unknown')
-            hw_model = user_info.get('hwModel', 'Unknown')
-            
-            # Check if favorite
-            is_favorite = 'isFavorite' in node
             
             # CSV row
             csv_row = [
@@ -146,29 +179,12 @@ class DataPersistence:
                 channel_util, last_heard, is_favorite
             ]
             csv_rows.append(csv_row)
-            
-            # JSON data
-            json_data['nodes'][node_id] = {
-                'user': {
-                    'shortName': short_name,
-                    'longName': long_name,
-                    'hwModel': hw_model
-                },
-                'deviceMetrics': {
-                    'batteryLevel': battery_level,
-                    'voltage': voltage,
-                    'isCharging': is_charging,
-                    'uptimeHours': uptime_hours,
-                    'channelUtilization': channel_util
-                },
-                'lastHeard': last_heard,
-                'isFavorite': is_favorite
-            }
         
         # Write to CSV
-        with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerows(csv_rows)
+        if csv_rows:
+            with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerows(csv_rows)
         
         # Write to JSON (append to file with timestamp)
         with open(self.json_file, 'a', encoding='utf-8') as f:
@@ -176,9 +192,10 @@ class DataPersistence:
         
         # Update the previous uptime tracking for saved nodes
         for node_id, node in nodes_data.items():
-            if 'deviceMetrics' in node:
+            if 'deviceMetrics' in node and not skip_csv_write:
                 uptime_hours = node['deviceMetrics'].get('uptimeSeconds', 0) / 3600
                 self._previous_uptimes[node_id] = uptime_hours
+                self._previous_last_heard[node_id] = int(node.get('lastHeard', 0) or 0)
         
         print(f"Saved data for {len(csv_rows)} nodes at {timestamp_str}")
     
@@ -248,19 +265,27 @@ class DataPersistence:
         Reconstruct the most-recent known state for every node from the CSV.
         Returns a dict keyed by node_id in the same shape used by MqttConnectionManager.
         """
+        nodes: Dict[str, Any] = {}
+
+        latest_snapshot = self.get_latest_data()
+        if latest_snapshot and isinstance(latest_snapshot.get('nodes'), dict):
+            for node_id, node in latest_snapshot['nodes'].items():
+                restored = dict(node)
+                restored['_from_persistence'] = True
+                nodes[str(node_id)] = restored
+
         if not os.path.exists(self.csv_file):
-            return {}
+            return nodes
         try:
             df = pd.read_csv(self.csv_file)
             if df.empty:
-                return {}
+                return nodes
 
             # Keep only the latest row per node
             df['timestamp'] = pd.to_datetime(df['timestamp'])
             df = df.sort_values('timestamp')
             latest = df.groupby('node_id').last().reset_index()
 
-            nodes: Dict[str, Any] = {}
             for _, row in latest.iterrows():
                 node_id = str(row['node_id'])
                 battery_level = int(row.get('battery_level', 0) or 0)
@@ -268,25 +293,115 @@ class DataPersistence:
                 uptime_hours = float(row.get('uptime_hours', 0.0) or 0.0)
                 channel_util = float(row.get('channel_utilization', 0.0) or 0.0)
                 last_heard = int(row.get('last_heard', 0) or 0)
+                existing = nodes.get(node_id, {})
+                existing_user = dict(existing.get('user') or {})
+                existing_user.update({
+                    'shortName': str(row.get('short_name', existing_user.get('shortName', node_id[-4:])) or node_id[-4:]),
+                    'longName': str(row.get('long_name', existing_user.get('longName', node_id)) or node_id),
+                    'hwModel': str(row.get('hw_model', existing_user.get('hwModel', 'Unknown')) or 'Unknown'),
+                })
+                existing_metrics = dict(existing.get('deviceMetrics') or {})
+                existing_metrics.update({
+                    'batteryLevel': battery_level,
+                    'voltage': voltage,
+                    'uptimeSeconds': int(uptime_hours * 3600),
+                    'channelUtilization': channel_util,
+                })
                 nodes[node_id] = {
-                    'user': {
-                        'shortName': str(row.get('short_name', node_id[-4:]) or node_id[-4:]),
-                        'longName': str(row.get('long_name', node_id) or node_id),
-                        'hwModel': str(row.get('hw_model', 'Unknown') or 'Unknown'),
-                    },
-                    'deviceMetrics': {
-                        'batteryLevel': battery_level,
-                        'voltage': voltage,
-                        'uptimeSeconds': int(uptime_hours * 3600),
-                        'channelUtilization': channel_util,
-                    },
-                    'lastHeard': last_heard,
+                    **existing,
+                    'user': existing_user,
+                    'deviceMetrics': existing_metrics,
+                    'lastHeard': max(int(existing.get('lastHeard', 0) or 0), last_heard),
                     '_from_persistence': True,
                 }
             print(f"Loaded {len(nodes)} nodes from persistence")
             return nodes
         except Exception as e:
             print(f"Warning: Could not load last known nodes: {e}")
+            return nodes
+
+    def save_neighbour_packets(self, packets: list[Dict[str, Any]]) -> None:
+        """Persist collected neighbour packets so they survive app restarts."""
+        try:
+            deduped_packets = []
+            seen = set()
+            for packet in packets:
+                reporter = packet.get('payload', {}).get('node_id', packet.get('from'))
+                timestamp = int(packet.get('timestamp', 0) or 0)
+                canonical = json.dumps(packet, sort_keys=True, separators=(',', ':'))
+                key = (str(reporter), timestamp, canonical)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_packets.append(packet)
+            count_to_save = len(deduped_packets[-5000:])
+            print(f"DEBUG: Saving {count_to_save} deduplicated neighbour packets to {self.neighbour_packets_file}")
+            with open(self.neighbour_packets_file, 'w', encoding='utf-8') as f:
+                json.dump(deduped_packets[-5000:], f)
+            print(f"DEBUG: Successfully wrote {count_to_save} packets to file")
+        except Exception as e:
+            print(f"Warning: Could not save neighbour packets: {e}")
+
+    def get_neighbour_packets(self) -> list[Dict[str, Any]]:
+        """Load persisted neighbour packets."""
+        if not os.path.exists(self.neighbour_packets_file):
+            print(f"DEBUG: Neighbour packets file does not exist at {self.neighbour_packets_file}")
+            return []
+        try:
+            with open(self.neighbour_packets_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            print(f"DEBUG: Loaded {len(data) if isinstance(data, list) else 'invalid'} neighbour packets from file")
+            if isinstance(data, list):
+                deduped_packets = []
+                seen = set()
+                for packet in data:
+                    reporter = packet.get('payload', {}).get('node_id', packet.get('from'))
+                    timestamp = int(packet.get('timestamp', 0) or 0)
+                    canonical = json.dumps(packet, sort_keys=True, separators=(',', ':'))
+                    key = (str(reporter), timestamp, canonical)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped_packets.append(packet)
+                print(f"DEBUG: After deduplication, {len(deduped_packets)} neighbour packets")
+                return deduped_packets
+        except Exception as e:
+            print(f"Warning: Could not load neighbour packets: {e}")
+        return []
+
+    def save_reporter_aliases(self, aliases: Dict[str, str]) -> None:
+        """Persist reporter-node nickname mappings."""
+        try:
+            clean_aliases: Dict[str, str] = {}
+            for reporter, alias in (aliases or {}).items():
+                key = str(reporter or '').strip()
+                value = str(alias or '').strip()
+                if not key or not value:
+                    continue
+                clean_aliases[key] = value
+            with open(self.reporter_aliases_file, 'w', encoding='utf-8') as f:
+                json.dump(clean_aliases, f, indent=2, sort_keys=True)
+        except Exception as e:
+            print(f"Warning: Could not save reporter aliases: {e}")
+
+    def get_reporter_aliases(self) -> Dict[str, str]:
+        """Load reporter-node nickname mappings."""
+        if not os.path.exists(self.reporter_aliases_file):
+            return {}
+        try:
+            with open(self.reporter_aliases_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            aliases: Dict[str, str] = {}
+            for reporter, alias in data.items():
+                key = str(reporter or '').strip()
+                value = str(alias or '').strip()
+                if key and value:
+                    aliases[key] = value
+            return aliases
+        except Exception as e:
+            print(f"Warning: Could not load reporter aliases: {e}")
             return {}
 
     def get_latest_data(self) -> Optional[Dict[str, Any]]:
