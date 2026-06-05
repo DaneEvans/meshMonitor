@@ -276,39 +276,15 @@ class MeshViewerGUI:
         with ui.card().classes('w-full'):
             # Node count display at the top
             def get_node_count_info(_=None):
-                if not self.connected or not self.mesh_interface or not hasattr(self.mesh_interface, 'interface'):
-                    return "Total Nodes: 0 | Active (3h): 0"
-
-                # Debounce display until values are final (avoid showing intermediate counts as the mesh loads)
-                nodes = list(self.mesh_interface.interface.nodes.values())
-                total_nodes = len(nodes)
-
-                # Don't show count unless mesh info is 'stable' (i.e. mesh is fully loaded and not in early phases)
-
-                # "Sticky" previous values for display
-                if not hasattr(self, '_last_node_count_info'):
-                    self._last_node_count_info = None
-                    self._stable_node_counts = (0, 0)
-                    self._last_update_time = 0
-
-                current_time = int(time.time())
-                three_hours_ago = current_time - (self.active_threshold * 3600)
-                active_nodes = sum(1 for node in nodes if 'lastHeard' in node and node['lastHeard'] >= three_hours_ago)
-
-                # Only update if both counts appear final (i.e. not in the process of loading more nodes)
-                # Simple debounce: only update if the value is different after a short interval
-                node_tuple = (active_nodes, total_nodes)
-                now = time.time()
-                if node_tuple != self._stable_node_counts:
-                    self._stable_node_counts = node_tuple
-                    self._last_update_time = now
-                    return ''  # Blank out label until stable, hide in-between values
-                elif now - self._last_update_time < 1.0:
-                    return ''  # Wait at least 1s at stable value before displaying
-                else:
-                    info_str = f"Nodes online: {active_nodes}/{total_nodes}"
-                    self._last_node_count_info = info_str
-                    return info_str
+                visible_nodes = self._get_visible_nodes_for_display()
+                total_nodes = len(visible_nodes)
+                active_cutoff = int(time.time()) - int(self.active_threshold * 3600)
+                active_nodes = sum(
+                    1
+                    for _, node in visible_nodes
+                    if int((node or {}).get('lastHeard') or 0) >= active_cutoff
+                )
+                return f"Total Nodes: {total_nodes} | Active ({self.active_threshold}h): {active_nodes}"
 
             self.node_count_label = ui.label(get_node_count_info()).classes('text-h6 text-center w-full mb-2')
             self.node_count_label.bind_text_from(self, 'connected', get_node_count_info)
@@ -1283,6 +1259,24 @@ class MeshViewerGUI:
         self.nodes_container.clear()
         ui_text = self.config.get_ui_text().get('nodes', {})
 
+        visible_nodes = self._get_visible_nodes_for_display()
+
+        if not visible_nodes:
+            with self.nodes_container:
+                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
+            if hasattr(self, 'node_count_label'):
+                self.node_count_label.update()
+            return
+
+        with self.nodes_container:
+            for node_id, node in visible_nodes:
+                self._create_node_card(node_id, node)
+
+        if hasattr(self, 'node_count_label'):
+            self.node_count_label.update()
+
+    def _get_visible_nodes_for_display(self) -> list[tuple[str, Dict[str, Any]]]:
+        """Return node rows that should be visible in the nodes panel."""
         # Build merged view: Meshtastic nodes first, then MQTT-only nodes
         all_nodes: Dict[str, Any] = {}
         all_nodes.update(self.nodes_data)        # Meshtastic nodes
@@ -1305,12 +1299,8 @@ class MeshViewerGUI:
                     merged.pop('_mqtt_source', None)
                 merged.pop('_from_persistence', None)
 
-        if not all_nodes:
-            with self.nodes_container:
-                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
-            return
-
         thirty_days_ago = int(time.time()) - 30 * 86400
+        visible_nodes: list[tuple[str, Dict[str, Any]]] = []
 
         for node_id, node in all_nodes.items():
             # Skip nodes not heard in the last 30 days
@@ -1326,8 +1316,10 @@ class MeshViewerGUI:
 
             if not self.show_all_nodes and 'isFavorite' not in node and not is_mqtt and not is_persisted:
                 continue
-            with self.nodes_container:
-                self._create_node_card(node_id, node)
+
+            visible_nodes.append((node_id, node))
+
+        return visible_nodes
 
     def hex_to_rgb(self, hex_str: str) -> tuple:
         """Convert hex color string to RGB tuple."""
