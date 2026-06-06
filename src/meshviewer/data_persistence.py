@@ -25,6 +25,7 @@ class DataPersistence:
         self.json_file = os.path.join(data_dir, "node_data.json")
         self.neighbour_packets_file = os.path.join(data_dir, "neighbour_packets.json")
         self.reporter_aliases_file = os.path.join(data_dir, "reporter_aliases.json")
+        self.reporter_visibility_file = os.path.join(data_dir, "reporter_visibility.json")
         
         # Create data directory if it doesn't exist
         os.makedirs(data_dir, exist_ok=True)
@@ -402,6 +403,39 @@ class DataPersistence:
             return aliases
         except Exception as e:
             print(f"Warning: Could not load reporter aliases: {e}")
+            return {}
+
+    def save_reporter_visibility(self, visibility: Dict[str, bool]) -> None:
+        """Persist reporter-node visibility mappings."""
+        try:
+            clean_visibility: Dict[str, bool] = {}
+            for reporter, visible in (visibility or {}).items():
+                key = str(reporter or '').strip()
+                if not key:
+                    continue
+                clean_visibility[key] = bool(visible)
+            with open(self.reporter_visibility_file, 'w', encoding='utf-8') as f:
+                json.dump(clean_visibility, f, indent=2, sort_keys=True)
+        except Exception as e:
+            print(f"Warning: Could not save reporter visibility: {e}")
+
+    def get_reporter_visibility(self) -> Dict[str, bool]:
+        """Load reporter-node visibility mappings."""
+        if not os.path.exists(self.reporter_visibility_file):
+            return {}
+        try:
+            with open(self.reporter_visibility_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {}
+            visibility: Dict[str, bool] = {}
+            for reporter, visible in data.items():
+                key = str(reporter or '').strip()
+                if key:
+                    visibility[key] = bool(visible)
+            return visibility
+        except Exception as e:
+            print(f"Warning: Could not load reporter visibility: {e}")
             return {}
 
     def get_latest_data(self) -> Optional[Dict[str, Any]]:

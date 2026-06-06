@@ -68,7 +68,9 @@ class MeshViewerGUI:
         self.neighbour_map_container = None
         self.neighbour_unknown_container = None
         self.reporter_aliases: Dict[str, str] = self.data_persistence.get_reporter_aliases()
+        self.reporter_visibility: Dict[str, bool] = self.data_persistence.get_reporter_visibility()
         self._known_reporting_nodes: list[str] = []
+        self._known_reporting_prefixes: Dict[str, str] = {}
 
         # Pre-populate with last-known node state so the display isn't empty on restart
         persisted = self.data_persistence.get_last_known_nodes()
@@ -274,39 +276,15 @@ class MeshViewerGUI:
         with ui.card().classes('w-full'):
             # Node count display at the top
             def get_node_count_info(_=None):
-                if not self.connected or not self.mesh_interface or not hasattr(self.mesh_interface, 'interface'):
-                    return "Total Nodes: 0 | Active (3h): 0"
-
-                # Debounce display until values are final (avoid showing intermediate counts as the mesh loads)
-                nodes = list(self.mesh_interface.interface.nodes.values())
-                total_nodes = len(nodes)
-
-                # Don't show count unless mesh info is 'stable' (i.e. mesh is fully loaded and not in early phases)
-
-                # "Sticky" previous values for display
-                if not hasattr(self, '_last_node_count_info'):
-                    self._last_node_count_info = None
-                    self._stable_node_counts = (0, 0)
-                    self._last_update_time = 0
-
-                current_time = int(time.time())
-                three_hours_ago = current_time - (self.active_threshold * 3600)
-                active_nodes = sum(1 for node in nodes if 'lastHeard' in node and node['lastHeard'] >= three_hours_ago)
-
-                # Only update if both counts appear final (i.e. not in the process of loading more nodes)
-                # Simple debounce: only update if the value is different after a short interval
-                node_tuple = (active_nodes, total_nodes)
-                now = time.time()
-                if node_tuple != self._stable_node_counts:
-                    self._stable_node_counts = node_tuple
-                    self._last_update_time = now
-                    return ''  # Blank out label until stable, hide in-between values
-                elif now - self._last_update_time < 1.0:
-                    return ''  # Wait at least 1s at stable value before displaying
-                else:
-                    info_str = f"Nodes online: {active_nodes}/{total_nodes}"
-                    self._last_node_count_info = info_str
-                    return info_str
+                visible_nodes = self._get_visible_nodes_for_display()
+                total_nodes = len(visible_nodes)
+                active_cutoff = int(time.time()) - int(self.active_threshold * 3600)
+                active_nodes = sum(
+                    1
+                    for _, node in visible_nodes
+                    if int((node or {}).get('lastHeard') or 0) >= active_cutoff
+                )
+                return f"Total Nodes: {total_nodes} | Active ({self.active_threshold}h): {active_nodes}"
 
             self.node_count_label = ui.label(get_node_count_info()).classes('text-h6 text-center w-full mb-2')
             self.node_count_label.bind_text_from(self, 'connected', get_node_count_info)
@@ -658,6 +636,45 @@ class MeshViewerGUI:
 
         return sorted(reporters)
 
+    def _collect_reporting_prefixes(self) -> Dict[str, str]:
+        """Collect latest known topic prefix label by reporting node id."""
+        prefix_by_reporter: Dict[str, str] = {}
+
+        def _prefix_label_from_topic(topic: str) -> str:
+            parsed = self._parse_mqtt_topic(topic)
+            prefix = str(parsed.get('prefix', '') or '').strip()
+            channel = str(parsed.get('channel', '') or '').strip()
+            if prefix:
+                return prefix
+            if channel:
+                return channel
+            parts = [p for p in str(topic or '').split('/') if p]
+            return '/'.join(parts[-3:]) if parts else ''
+
+        for node in self.mqtt_nodes_data.values():
+            topic = str((node or {}).get('mqtt_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if not reporter:
+                continue
+            label = _prefix_label_from_topic(topic)
+            if label:
+                prefix_by_reporter[reporter] = label
+
+        for pkt in self.neighbour_packets:
+            topic = str((pkt or {}).get('_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if not reporter:
+                continue
+            label = _prefix_label_from_topic(topic)
+            if label:
+                prefix_by_reporter[reporter] = label
+
+        return prefix_by_reporter
+
     def _set_reporter_alias(self, reporter_id: str, alias_value: Any) -> None:
         """Set/update nickname for a reporter node id and persist it."""
         key = str(reporter_id or '').strip()
@@ -675,31 +692,75 @@ class MeshViewerGUI:
         # Do NOT rebuild reporters UI here — that would destroy the input the user is typing in
         self._update_nodes_display()
 
+    def _is_reporter_visible(self, reporter_id: str) -> bool:
+        """Return True when a reporter source is enabled for display."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return True
+        return bool(self.reporter_visibility.get(key, True))
+
+    def _is_node_visible_for_reporter(self, node: Dict[str, Any]) -> bool:
+        """Return True when a node's MQTT reporter source is enabled."""
+        topic = str((node or {}).get('mqtt_topic') or '').strip()
+        if not topic:
+            return True
+        reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+        return self._is_reporter_visible(reporter)
+
+    def _set_reporter_visibility(self, reporter_id: str, visible: bool) -> None:
+        """Set whether a reporter source should be shown in node/map views."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return
+        self.reporter_visibility[key] = bool(visible)
+        self.data_persistence.save_reporter_visibility(self.reporter_visibility)
+        self._refresh_mqtt_reporters_ui(force=True)
+        self._update_nodes_display()
+        self._update_neighbour_views()
+
     def _refresh_mqtt_reporters_ui(self, force: bool = False) -> None:
         """Refresh MQTT settings section listing reporting nodes and nickname inputs."""
         if self.mqtt_reporters_container is None:
             return
 
         reporters = self._collect_reporting_nodes()
-        if not force and reporters == self._known_reporting_nodes:
+        reporter_prefixes = self._collect_reporting_prefixes()
+        if not force and reporters == self._known_reporting_nodes and reporter_prefixes == self._known_reporting_prefixes:
             return
         self._known_reporting_nodes = list(reporters)
+        self._known_reporting_prefixes = dict(reporter_prefixes)
 
         self.mqtt_reporters_container.clear()
         with self.mqtt_reporters_container:
             if not reporters:
                 ui.label('No reporting nodes discovered yet').classes('text-caption text-gray-500')
                 return
+
+            with ui.row().classes('w-full items-center gap-2 pb-1 border-b border-gray-300/40'):
+                ui.label('ID').classes('text-caption font-semibold w-40')
+                ui.label('Nickname').classes('text-caption font-semibold flex-1')
+                ui.label('Show').classes('text-caption font-semibold w-16 text-right')
+
             for reporter in reporters:
+                is_visible = self._is_reporter_visible(reporter)
                 with ui.row().classes('w-full items-center gap-2'):
-                    ui.label(reporter).classes('text-caption font-mono w-40')
+                    with ui.column().classes('w-40 gap-0'):
+                        ui.label(reporter).classes('text-caption font-mono')
+                        prefix_label = str(reporter_prefixes.get(reporter, '') or '').strip()
+                        if prefix_label:
+                            ui.label(prefix_label).classes('text-[11px] text-gray-500 -mt-1 break-all')
                     # on_change gives ValueChangeEventArguments with a reliable .value
                     ui.input(
-                        'Nickname',
+                        '',
                         value=self.reporter_aliases.get(reporter, ''),
                         placeholder='optional nickname',
                         on_change=lambda e, rid=reporter: self._set_reporter_alias(rid, e.value)
                     ).classes('flex-1')
+                    ui.switch(
+                        '',
+                        value=is_visible,
+                        on_change=lambda e, rid=reporter: self._set_reporter_visibility(rid, bool(e.value))
+                    ).props('dense').classes('w-16 justify-end')
 
     @staticmethod
     def _to_node_id(value: Any) -> str:
@@ -780,6 +841,8 @@ class MeshViewerGUI:
             reporter = self._to_node_id(payload.get('node_id') or pkt.get('from'))
             if not reporter:
                 continue
+            if not self._is_reporter_visible(reporter):
+                continue
             reporter_nodes.add(reporter)
             ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
             current_latest = latest_packets_by_reporter.get(reporter)
@@ -807,6 +870,8 @@ class MeshViewerGUI:
         visible_nodes: Dict[str, Any] = dict(self.nodes_data)
         for node_id, node in self.mqtt_nodes_data.items():
             if node_id not in visible_nodes:
+                if not self._is_node_visible_for_reporter(node):
+                    continue
                 visible_nodes[node_id] = node
 
         known_neighbour_nodes = set(edges_node for edge in edges for edges_node in edge) | set(latest_packets_by_reporter.keys())
@@ -1194,10 +1259,30 @@ class MeshViewerGUI:
         self.nodes_container.clear()
         ui_text = self.config.get_ui_text().get('nodes', {})
 
+        visible_nodes = self._get_visible_nodes_for_display()
+
+        if not visible_nodes:
+            with self.nodes_container:
+                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
+            if hasattr(self, 'node_count_label'):
+                self.node_count_label.update()
+            return
+
+        with self.nodes_container:
+            for node_id, node in visible_nodes:
+                self._create_node_card(node_id, node)
+
+        if hasattr(self, 'node_count_label'):
+            self.node_count_label.update()
+
+    def _get_visible_nodes_for_display(self) -> list[tuple[str, Dict[str, Any]]]:
+        """Return node rows that should be visible in the nodes panel."""
         # Build merged view: Meshtastic nodes first, then MQTT-only nodes
         all_nodes: Dict[str, Any] = {}
         all_nodes.update(self.nodes_data)        # Meshtastic nodes
         for node_id, node in self.mqtt_nodes_data.items():
+            if not self._is_node_visible_for_reporter(node):
+                continue
             if node_id not in all_nodes:
                 all_nodes[node_id] = node
             else:
@@ -1214,12 +1299,8 @@ class MeshViewerGUI:
                     merged.pop('_mqtt_source', None)
                 merged.pop('_from_persistence', None)
 
-        if not all_nodes:
-            with self.nodes_container:
-                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
-            return
-
         thirty_days_ago = int(time.time()) - 30 * 86400
+        visible_nodes: list[tuple[str, Dict[str, Any]]] = []
 
         for node_id, node in all_nodes.items():
             # Skip nodes not heard in the last 30 days
@@ -1235,8 +1316,10 @@ class MeshViewerGUI:
 
             if not self.show_all_nodes and 'isFavorite' not in node and not is_mqtt and not is_persisted:
                 continue
-            with self.nodes_container:
-                self._create_node_card(node_id, node)
+
+            visible_nodes.append((node_id, node))
+
+        return visible_nodes
 
     def hex_to_rgb(self, hex_str: str) -> tuple:
         """Convert hex color string to RGB tuple."""
