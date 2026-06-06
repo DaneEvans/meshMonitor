@@ -701,11 +701,23 @@ class MqttConnectionManager:
         self.disconnect()  # clean up any previous connection
 
         try:
-            client = mqtt_client.Client(
-                client_id="meshmonitor",
-                clean_session=True,
-                protocol=mqtt_client.MQTTv311,
-            )
+            # Handle paho-mqtt v1.x vs v2.x API differences
+            try:
+                # Try v2.x API first (with callback_api_version)
+                from paho.mqtt.client import CallbackAPIVersion
+                client = mqtt_client.Client(
+                    CallbackAPIVersion.VERSION1,
+                    client_id="meshmonitor",
+                    clean_start=False,
+                )
+            except (ImportError, TypeError):
+                # Fall back to v1.x API
+                client = mqtt_client.Client(
+                    client_id="meshmonitor",
+                    clean_session=True,
+                    protocol=mqtt_client.MQTTv311,
+                )
+            
             if username:
                 client.username_pw_set(username, password)
 
@@ -814,10 +826,13 @@ class MqttConnectionManager:
 
     def _on_message(self, client, userdata, msg):
         """Parse an incoming MQTT message and update the nodes dict."""
+        print(f"DEBUG: _on_message called | topic: {msg.topic} | payload length: {len(msg.payload)}")
         try:
             payload_str = msg.payload.decode("utf-8", errors="replace")
             data = json.loads(payload_str)
-        except Exception:
+            print(f"DEBUG: Parsed JSON | type: {data.get('type')} | from: {data.get('from')}")
+        except Exception as e:
+            print(f"DEBUG: Failed to parse message: {e}")
             return  # ignore non-JSON messages
 
         msg_type = data.get("type", "")

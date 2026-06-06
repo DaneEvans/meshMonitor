@@ -8,7 +8,7 @@ idna==3.10
 meshtastic==2.7.8
 nicegui==1.4.25
 packaging==24.2
-paho-mqtt>=1.6.1
+paho-mqtt>=1.6.1,<2.0
 pandas>=1.5.0
 plotly>=5.0.0
 print-color==0.4.6
