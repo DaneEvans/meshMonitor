@@ -229,27 +229,28 @@ class MeshViewerGUI:
         # ── MQTT connection card ────────────────────────────────────────
         with ui.card().classes('w-full mt-2'):
             ui.label('MQTT Connection').classes('text-h6')
+            mqtt_defaults = self.config.get_mqtt_defaults()
             with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
                 self.mqtt_host_input = ui.input(
                     'Broker URL',
-                    value=self.config.get('mqtt.default_host', ''),
+                    value=mqtt_defaults.get('default_host', ''),
                     placeholder='hostname or mqtt://host:1883',
                 ).classes('flex-1 min-w-0')
             with ui.row().classes('w-full items-center gap-2'):
                 self.mqtt_user_input = ui.input(
                     'Username',
-                    value=self.config.get('mqtt.default_username', ''),
+                    value=mqtt_defaults.get('default_username', ''),
                 ).classes('flex-1')
                 self.mqtt_pass_input = ui.input(
                     'Password',
-                    value=self.config.get('mqtt.default_password', ''),
+                    value=mqtt_defaults.get('default_password', ''),
                     password=True,
                     password_toggle_button=True,
                 ).classes('flex-1')
             with ui.row().classes('w-full items-center gap-2'):
                 self.mqtt_topic_input = ui.input(
                     'Topic',
-                    value=self.config.get('mqtt.default_topic', '#'),
+                    value=mqtt_defaults.get('default_topic', '#'),
                     placeholder='# (all topics)',
                 ).classes('flex-1')
             with ui.row().classes('w-full gap-2'):
@@ -1678,8 +1679,8 @@ class MeshViewerGUI:
                 df = df.drop_duplicates(subset=['timestamp'], keep='last')
                 print(f"DEBUG: Data shape after deduplication: {df.shape}")
                 
-                if not df.empty:
-                    print(f"DEBUG: Filtered data sample: {df[['timestamp', 'node_id', 'short_name', 'voltage', 'battery_level']].head()}")
+                # if not df.empty:
+                #     print(f"DEBUG: Filtered data sample: {df[['timestamp', 'node_id', 'short_name', 'voltage', 'battery_level']].head()}")
             
             # if df.empty:
             if False:
@@ -1777,12 +1778,12 @@ class MeshViewerGUI:
             print(f"DEBUG: Battery range: {df['battery_level'].min():.0f}% to {df['battery_level'].max():.0f}%")
             print(f"DEBUG: Time range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
-            print("DEBUG: Voltage values:")
-            print(df['voltage'].tolist())
-            print("DEBUG: Battery level values:")
-            print(df['battery_level'].tolist())
-            print("DEBUG: Timestamps:")
-            print(df['timestamp'].tolist())
+            # print("DEBUG: Voltage values:")
+            # print(df['voltage'].tolist())
+            # print("DEBUG: Battery level values:")
+            # print(df['battery_level'].tolist())
+            # print("DEBUG: Timestamps:")
+            # print(df['timestamp'].tolist())
             print("DEBUG: Checking for duplicates:")
             print(f"DEBUG: Total rows: {len(df)}")
             print(f"DEBUG: Unique timestamps: {df['timestamp'].nunique()}")
