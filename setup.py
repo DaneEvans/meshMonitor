@@ -35,7 +35,7 @@ setup(
     install_requires=requirements,
     entry_points={
         "console_scripts": [
-            "meshviewer-gui=main:main",
+            "meshviewer-gui=meshviewer.main:main",
             "meshviewer-cli=meshviewer.cli:main",
         ],
     },

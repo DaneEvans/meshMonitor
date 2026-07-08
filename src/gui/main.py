@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Main GUI module for MeshViewer using NiceGUI.
 """
