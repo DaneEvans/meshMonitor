@@ -618,8 +618,10 @@ class MeshViewerGUI:
     def _collect_reporting_nodes(self) -> list[str]:
         """Collect all known MQTT reporting node ids from topic paths."""
         reporters = set()
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        neighbour_packets = [dict(pkt or {}) for pkt in self.neighbour_packets]
 
-        for node in self.mqtt_nodes_data.values():
+        for node in mqtt_nodes.values():
             topic = str((node or {}).get('mqtt_topic') or '').strip()
             if not topic:
                 continue
@@ -627,7 +629,7 @@ class MeshViewerGUI:
             if reporter:
                 reporters.add(reporter)
 
-        for pkt in self.neighbour_packets:
+        for pkt in neighbour_packets:
             topic = str((pkt or {}).get('_topic') or '').strip()
             if not topic:
                 continue
@@ -640,6 +642,8 @@ class MeshViewerGUI:
     def _collect_reporting_prefixes(self) -> Dict[str, str]:
         """Collect latest known topic prefix label by reporting node id."""
         prefix_by_reporter: Dict[str, str] = {}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        neighbour_packets = [dict(pkt or {}) for pkt in self.neighbour_packets]
 
         def _prefix_label_from_topic(topic: str) -> str:
             parsed = self._parse_mqtt_topic(topic)
@@ -652,7 +656,7 @@ class MeshViewerGUI:
             parts = [p for p in str(topic or '').split('/') if p]
             return '/'.join(parts[-3:]) if parts else ''
 
-        for node in self.mqtt_nodes_data.values():
+        for node in mqtt_nodes.values():
             topic = str((node or {}).get('mqtt_topic') or '').strip()
             if not topic:
                 continue
@@ -663,7 +667,7 @@ class MeshViewerGUI:
             if label:
                 prefix_by_reporter[reporter] = label
 
-        for pkt in self.neighbour_packets:
+        for pkt in neighbour_packets:
             topic = str((pkt or {}).get('_topic') or '').strip()
             if not topic:
                 continue
@@ -804,7 +808,10 @@ class MeshViewerGUI:
     def _update_neighbour_views(self) -> None:
         """Refresh Neighbour map tab sections from collected MQTT packets."""
         self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
-        print(f"DEBUG: _update_neighbour_views retrieved {len(self.neighbour_packets)} packets from mqtt_manager")
+        neighbour_packets = [dict(pkt or {}) for pkt in self.neighbour_packets]
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        print(f"DEBUG: _update_neighbour_views retrieved {len(neighbour_packets)} packets from mqtt_manager")
         self._refresh_mqtt_reporters_ui()
 
         if self.neighbour_log_container is None or self.neighbour_map_container is None or self.neighbour_unknown_container is None:
@@ -813,13 +820,13 @@ class MeshViewerGUI:
         # ---- log section ----
         self.neighbour_log_container.clear()
         with self.neighbour_log_container:
-            total = len(self.neighbour_packets)
+            total = len(neighbour_packets)
             ui.label(f'Packets collected: {total}').classes('text-caption text-gray-500')
             if total == 0:
                 ui.label('No neighbour packets yet').classes('text-gray-500')
             else:
                 # Keep UI manageable while still collecting all in memory
-                recent_packets = self.neighbour_packets[-200:]
+                recent_packets = neighbour_packets[-200:]
                 if total > len(recent_packets):
                     ui.label(f'Showing latest {len(recent_packets)} packets').classes('text-caption text-gray-500')
                 for pkt in reversed(recent_packets):
@@ -835,7 +842,7 @@ class MeshViewerGUI:
         edges: Dict[tuple, Dict[str, Any]] = {}
         reporter_nodes = set()
         latest_packets_by_reporter: Dict[str, Dict[str, Any]] = {}
-        for pkt in self.neighbour_packets:
+        for pkt in neighbour_packets:
             if (pkt.get('type') or '').lower() not in ('neighborinfo', 'neighbourinfo'):
                 continue
             payload = pkt.get('payload') or {}
@@ -868,8 +875,8 @@ class MeshViewerGUI:
         # ---- unknown neighbour section ----
         self.neighbour_unknown_container.clear()
         three_hours_ago = int(time.time()) - (3 * 3600)
-        visible_nodes: Dict[str, Any] = dict(self.nodes_data)
-        for node_id, node in self.mqtt_nodes_data.items():
+        visible_nodes: Dict[str, Any] = dict(mesh_nodes)
+        for node_id, node in mqtt_nodes.items():
             if node_id not in visible_nodes:
                 if not self._is_node_visible_for_reporter(node):
                     continue
@@ -1200,8 +1207,10 @@ class MeshViewerGUI:
     async def _async_mqtt_refresh(self) -> None:
         """Async wrapper to update nodes display from MQTT data."""
         # Persist MQTT updates even when no manual refresh occurs.
-        merged_for_persistence = dict(self.nodes_data)
-        for nid, mqtt_node in self.mqtt_nodes_data.items():
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        merged_for_persistence = dict(mesh_nodes)
+        for nid, mqtt_node in mqtt_nodes.items():
             if nid not in merged_for_persistence:
                 merged_for_persistence[nid] = mqtt_node
             else:
@@ -1235,8 +1244,10 @@ class MeshViewerGUI:
         self._refresh_mqtt_reporters_ui()
 
         # Persist merged data (Meshtastic + MQTT) so battery history captures both
-        merged_for_persistence = dict(self.nodes_data)
-        for nid, mqtt_node in self.mqtt_nodes_data.items():
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        merged_for_persistence = dict(mesh_nodes)
+        for nid, mqtt_node in mqtt_nodes.items():
             if nid not in merged_for_persistence:
                 merged_for_persistence[nid] = mqtt_node
             else:
@@ -1279,9 +1290,10 @@ class MeshViewerGUI:
     def _get_visible_nodes_for_display(self) -> list[tuple[str, Dict[str, Any]]]:
         """Return node rows that should be visible in the nodes panel."""
         # Build merged view: Meshtastic nodes first, then MQTT-only nodes
-        all_nodes: Dict[str, Any] = {}
-        all_nodes.update(self.nodes_data)        # Meshtastic nodes
-        for node_id, node in self.mqtt_nodes_data.items():
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        all_nodes: Dict[str, Any] = dict(mesh_nodes)
+        for node_id, node in mqtt_nodes.items():
             if not self._is_node_visible_for_reporter(node):
                 continue
             if node_id not in all_nodes:
