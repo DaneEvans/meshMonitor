@@ -19,6 +19,7 @@ except ImportError:
 import json
 import time
 import threading
+import copy
 from dataclasses import dataclass
 from typing import Optional, Callable, Any, List, Dict
 
@@ -740,12 +741,12 @@ class MqttConnectionManager:
     def get_nodes_data(self) -> Dict[str, Any]:
         """Return a snapshot of the current node data (thread-safe copy)."""
         with self._lock:
-            return dict(self._nodes)
+            return copy.deepcopy(self._nodes)
 
     def get_neighbor_packets(self) -> List[Dict[str, Any]]:
         """Return a snapshot of collected neighborinfo packets (thread-safe copy)."""
         with self._lock:
-            return list(self._neighbor_packets)
+            return copy.deepcopy(self._neighbor_packets)
 
     def set_neighbor_packets(self, packets: List[Dict[str, Any]]) -> None:
         """Restore previously collected neighborinfo packets."""

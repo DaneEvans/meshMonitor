@@ -4,7 +4,11 @@
 import atexit
 import signal
 import sys
+import threading
+import traceback
+import os
 from pathlib import Path
+from datetime import datetime
 
 
 src_path = Path(__file__).resolve().parents[1]
@@ -12,6 +16,89 @@ if str(src_path) not in sys.path:
     sys.path.insert(0, str(src_path))
 
 from gui.main import MeshViewerGUI
+
+
+class _TeeStream:
+    """Write to both console and a log file."""
+
+    def __init__(self, console_stream, log_stream):
+        self.console_stream = console_stream
+        self.log_stream = log_stream
+
+    def write(self, data):
+        if not data:
+            return 0
+        try:
+            self.console_stream.write(data)
+        except Exception:
+            pass
+        try:
+            self.log_stream.write(data)
+        except Exception:
+            pass
+        return len(data)
+
+    def flush(self):
+        try:
+            self.console_stream.flush()
+        except Exception:
+            pass
+        try:
+            self.log_stream.flush()
+        except Exception:
+            pass
+
+    def isatty(self):
+        try:
+            return bool(self.console_stream.isatty())
+        except Exception:
+            return False
+
+
+_LOG_SETUP_DONE = False
+_LOG_FILE_HANDLE = None
+
+
+def _setup_runtime_logging() -> Path:
+    """Route stdout/stderr and uncaught exceptions to runlogs/meshmonitor.log."""
+    global _LOG_SETUP_DONE, _LOG_FILE_HANDLE
+
+    project_root = Path(__file__).resolve().parents[2]
+    log_dir = project_root / 'runlogs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log_path = Path((
+        os.environ.get('MESHMONITOR_LOG_FILE')
+        or str(log_dir / 'meshmonitor.log')
+    )).expanduser()
+    if not log_path.is_absolute():
+        log_path = (project_root / log_path).resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if _LOG_SETUP_DONE:
+        return log_path
+
+    _LOG_FILE_HANDLE = open(log_path, 'a', encoding='utf-8', buffering=1)
+    _LOG_FILE_HANDLE.write(
+        f"\n===== MeshMonitor start {datetime.now().isoformat(timespec='seconds')} =====\n"
+    )
+
+    sys.stdout = _TeeStream(sys.__stdout__, _LOG_FILE_HANDLE)
+    sys.stderr = _TeeStream(sys.__stderr__, _LOG_FILE_HANDLE)
+
+    def _log_uncaught(exc_type, exc_value, exc_tb):
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+
+    def _log_thread_uncaught(args):
+        traceback.print_exception(args.exc_type, args.exc_value, args.exc_traceback, file=sys.stderr)
+
+    sys.excepthook = _log_uncaught
+    if hasattr(threading, 'excepthook'):
+        threading.excepthook = _log_thread_uncaught
+
+    _LOG_SETUP_DONE = True
+    print(f"Logging to {log_path}")
+    return log_path
 
 
 class MeshViewerApp:
@@ -69,6 +156,7 @@ class MeshViewerApp:
 
 def main():
     """Main entry point for the application."""
+    _setup_runtime_logging()
     app = MeshViewerApp()
     import argparse
 

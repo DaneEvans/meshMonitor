@@ -11,6 +11,8 @@ from meshviewer.data_persistence import DataPersistence
 import json
 import math
 import time
+import traceback
+import threading
 import plotly.graph_objects as go
 import socket
 
@@ -25,6 +27,9 @@ class MeshViewerGUI:
         self.config = ConfigManager(config_path)
 
         self.set_theme()
+
+        # Lock to serialize UI element mutations and prevent NiceGUI elements dict races
+        self._ui_update_lock = threading.Lock()
 
         # Pass shared ConfigManager to connection manager so both use the same config
         self.connection_manager = MeshConnectionManager(cfg=self.config)
@@ -1202,11 +1207,30 @@ class MeshViewerGUI:
         try:
             from nicegui import background_tasks
             background_tasks.create(self._async_mqtt_refresh())
-        except Exception:
-            pass  # Will update on next manual/auto refresh
+        except Exception as e:
+            print(f'WARNING: failed to schedule MQTT UI refresh: {e}')
+            traceback.print_exc()
 
     async def _async_mqtt_refresh(self) -> None:
         """Async wrapper to update nodes display from MQTT data."""
+        try:
+            await self._run_mqtt_refresh_once()
+        except RuntimeError as e:
+            if 'dictionary changed size during iteration' not in str(e).lower():
+                raise
+            print(
+                'MESHMONITOR_DICT_RACE: concurrent dictionary update during MQTT refresh; '
+                f'retrying once with fresh snapshots (mqtt_nodes={len(self.mqtt_nodes_data)}, '
+                f'neighbour_packets={len(self.neighbour_packets)}).'
+            )
+            traceback.print_exc()
+            self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+            self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+            await self._run_mqtt_refresh_once()
+
+    async def _run_mqtt_refresh_once(self) -> None:
+        """Run one MQTT-driven UI refresh pass using current snapshots."""
+        import asyncio
         # Persist MQTT updates even when no manual refresh occurs.
         mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
         mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
@@ -1224,69 +1248,87 @@ class MeshViewerGUI:
             self.data_persistence.save_nodes_data(merged_for_persistence)
         self.data_persistence.save_neighbour_packets(self.neighbour_packets)
 
+        # Yield between UI mutations to allow NiceGUI's response builder to complete
         self._refresh_mqtt_reporters_ui()
+        await asyncio.sleep(0)
         self._update_nodes_display()
+        await asyncio.sleep(0)
         self._update_neighbour_views()
     
     def refresh_nodes(self) -> None:
         """Refresh the nodes display."""
-        if self.connected and self.mesh_interface:
-            # Refresh Meshtastic nodes data
-            self.mesh_interface.refresh_nodes_data()
-            self.mesh_interface.detect_last_heard_changes()
-            self.mesh_interface.force_last_heard_update()
-            self.nodes_data = self.mesh_interface.get_all_nodes_data()
-            # Save data to persistence layer
-            self.data_persistence.save_nodes_data(self.nodes_data)
+        try:
+            if self.connected and self.mesh_interface:
+                # Refresh Meshtastic nodes data
+                self.mesh_interface.refresh_nodes_data()
+                self.mesh_interface.detect_last_heard_changes()
+                self.mesh_interface.force_last_heard_update()
+                self.nodes_data = self.mesh_interface.get_all_nodes_data()
+                # Save data to persistence layer
+                self.data_persistence.save_nodes_data(self.nodes_data)
 
-        # Always pull latest MQTT nodes
-        self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
-        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
-        self._refresh_mqtt_reporters_ui()
+            # Always pull latest MQTT nodes
+            self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+            self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+            self._refresh_mqtt_reporters_ui()
 
-        # Persist merged data (Meshtastic + MQTT) so battery history captures both
-        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
-        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
-        merged_for_persistence = dict(mesh_nodes)
-        for nid, mqtt_node in mqtt_nodes.items():
-            if nid not in merged_for_persistence:
-                merged_for_persistence[nid] = mqtt_node
-            else:
-                existing = merged_for_persistence[nid]
-                mqtt_last = int(mqtt_node.get('lastHeard', 0) or 0)
-                existing_last = int(existing.get('lastHeard', 0) or 0)
-                if mqtt_last > existing_last:
-                    merged_for_persistence[nid] = {**existing, **mqtt_node, 'lastHeard': mqtt_last}
-        if merged_for_persistence:
-            self.data_persistence.save_nodes_data(merged_for_persistence)
-        self.data_persistence.save_neighbour_packets(self.neighbour_packets)
+            # Persist merged data (Meshtastic + MQTT) so battery history captures both
+            mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+            mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+            merged_for_persistence = dict(mesh_nodes)
+            for nid, mqtt_node in mqtt_nodes.items():
+                if nid not in merged_for_persistence:
+                    merged_for_persistence[nid] = mqtt_node
+                else:
+                    existing = merged_for_persistence[nid]
+                    mqtt_last = int(mqtt_node.get('lastHeard', 0) or 0)
+                    existing_last = int(existing.get('lastHeard', 0) or 0)
+                    if mqtt_last > existing_last:
+                        merged_for_persistence[nid] = {**existing, **mqtt_node, 'lastHeard': mqtt_last}
+            if merged_for_persistence:
+                self.data_persistence.save_nodes_data(merged_for_persistence)
+            self.data_persistence.save_neighbour_packets(self.neighbour_packets)
 
-        self._update_nodes_display()
-        self._update_neighbour_views()
-        # Update the node count display
-        if hasattr(self, 'node_count_label'):
-            self.node_count_label.update()
+            self._update_nodes_display()
+            self._update_neighbour_views()
+            # Update the node count display
+            if hasattr(self, 'node_count_label'):
+                self.node_count_label.update()
+        except RuntimeError as e:
+            if 'dictionary changed size during iteration' not in str(e).lower():
+                raise
+            print(
+                'MESHMONITOR_DICT_RACE: concurrent dictionary update during refresh_nodes; '
+                'retrying once with fresh MQTT snapshots.'
+            )
+            traceback.print_exc()
+            self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+            self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+            self._update_nodes_display()
+            self._update_neighbour_views()
     
     def _update_nodes_display(self) -> None:
         """Update the nodes display with current data (Meshtastic + MQTT merged)."""
-        self.nodes_container.clear()
-        ui_text = self.config.get_ui_text().get('nodes', {})
+        # Use lock to prevent concurrent mutations of NiceGUI's elements dict
+        with self._ui_update_lock:
+            self.nodes_container.clear()
+            ui_text = self.config.get_ui_text().get('nodes', {})
 
-        visible_nodes = self._get_visible_nodes_for_display()
+            visible_nodes = self._get_visible_nodes_for_display()
 
-        if not visible_nodes:
+            if not visible_nodes:
+                with self.nodes_container:
+                    ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
+                if hasattr(self, 'node_count_label'):
+                    self.node_count_label.update()
+                return
+
             with self.nodes_container:
-                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
+                for node_id, node in visible_nodes:
+                    self._create_node_card(node_id, node)
+
             if hasattr(self, 'node_count_label'):
                 self.node_count_label.update()
-            return
-
-        with self.nodes_container:
-            for node_id, node in visible_nodes:
-                self._create_node_card(node_id, node)
-
-        if hasattr(self, 'node_count_label'):
-            self.node_count_label.update()
 
     def _get_visible_nodes_for_display(self) -> list[tuple[str, Dict[str, Any]]]:
         """Return node rows that should be visible in the nodes panel."""

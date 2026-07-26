@@ -19,8 +19,27 @@ class MeshInterface:
         self.last_heard_cache = {}  # Cache to track lastHeard changes
 
     def _nodes_snapshot(self) -> Dict[str, Dict[str, Any]]:
-        """Return a shallow snapshot of the current node map."""
-        return dict(getattr(self.interface, 'nodes', {}) or {})
+        """Return a shallow snapshot of the current node map.
+
+        Meshtastic mutates the source dictionary from background handlers.
+        Retrying here prevents intermittent "dictionary changed size" crashes
+        during GUI refresh.
+        """
+        source = getattr(self.interface, 'nodes', {}) or {}
+        for attempt in range(3):
+            try:
+                return dict(source)
+            except RuntimeError as e:
+                if 'dictionary changed size during iteration' not in str(e).lower():
+                    raise
+                print(
+                    'MESHMONITOR_DICT_RACE: mesh interface nodes snapshot '
+                    f'failed on attempt {attempt + 1}/3; retrying.'
+                )
+                if attempt == 2:
+                    raise
+                time.sleep(0.01)
+        return {}
 
     def get_uptime(self, node: Dict[str, Any], asString: bool = True) -> Any:
         """
