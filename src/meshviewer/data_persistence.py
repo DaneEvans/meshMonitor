@@ -47,7 +47,8 @@ class DataPersistence:
             headers = [
                 'timestamp', 'node_id', 'short_name', 'long_name', 'hw_model',
                 'battery_level', 'voltage', 'is_charging', 'uptime_hours',
-                'channel_utilization', 'last_heard', 'is_favorite'
+                'channel_utilization', 'last_heard', 'is_favorite',
+                'co2', 'co2_temperature', 'co2_humidity'
             ]
             with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
@@ -173,11 +174,17 @@ class DataPersistence:
             # Extract other metrics
             channel_util = node['deviceMetrics'].get('channelUtilization', 0.0)
             
+            # Extract telemetry fields
+            co2 = node['deviceMetrics'].get('co2', None)
+            co2_temperature = node['deviceMetrics'].get('co2Temperature', None)
+            co2_humidity = node['deviceMetrics'].get('co2Humidity', None)
+            
             # CSV row
             csv_row = [
                 timestamp_str, node_id, short_name, long_name, hw_model,
                 battery_level, voltage, is_charging, uptime_hours,
-                channel_util, last_heard, is_favorite
+                channel_util, last_heard, is_favorite,
+                co2, co2_temperature, co2_humidity
             ]
             csv_rows.append(csv_row)
         
@@ -256,6 +263,62 @@ class DataPersistence:
             DataFrame with battery history for the specific node
         """
         df = self.get_battery_history(days)
+        if df.empty:
+            return df
+        
+        return df[df['node_id'] == node_id].copy()
+    
+    def get_telemetry_history(self, days: float = 7) -> pd.DataFrame:
+        """
+        Get telemetry history data (CO2, temperature, humidity) for the specified time period.
+        
+        Args:
+            days: Number of days (or fractional days for hours) to look back
+            
+        Returns:
+            DataFrame with telemetry history data
+        """
+        if not os.path.exists(self.csv_file):
+            return pd.DataFrame()
+        
+        try:
+            # Read CSV data
+            df = pd.read_csv(self.csv_file)
+            
+            if df.empty:
+                return df
+            
+            # Convert timestamp to datetime
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            
+            # Filter to last N days
+            cutoff_date = datetime.now() - timedelta(days=days)
+            df = df[df['timestamp'] >= cutoff_date]
+            
+            # Filter out rows with no telemetry data
+            df = df.dropna(subset=['co2', 'co2_temperature', 'co2_humidity'], how='all')
+            
+            # Sort by timestamp
+            df = df.sort_values('timestamp')
+            
+            return df
+            
+        except Exception as e:
+            print(f"Error reading telemetry history: {e}")
+            return pd.DataFrame()
+    
+    def get_node_telemetry_history(self, node_id: str, days: float = 7) -> pd.DataFrame:
+        """
+        Get telemetry history for a specific node.
+        
+        Args:
+            node_id: Node ID to get history for
+            days: Number of days (or fractional days for hours) to look back
+            
+        Returns:
+            DataFrame with telemetry history for the specific node
+        """
+        df = self.get_telemetry_history(days)
         if df.empty:
             return df
         

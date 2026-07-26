@@ -8,6 +8,8 @@ from meshviewer.connection import MeshConnectionManager, MqttConnectionManager
 from meshviewer.interface import MeshInterface
 from meshviewer.config import ConfigManager
 from meshviewer.data_persistence import DataPersistence
+from gui.user_manager import UserManager
+from gui.login import LoginUI
 import json
 import math
 import time
@@ -30,6 +32,12 @@ class MeshViewerGUI:
 
         # Lock to serialize UI element mutations and prevent NiceGUI elements dict races
         self._ui_update_lock = threading.Lock()
+
+        # User management
+        self.user_manager = UserManager()
+        self.current_user: Optional[str] = None
+        self.login_ui: Optional[LoginUI] = None
+        self.main_content = None  # Will hold the main UI container
 
         # Pass shared ConfigManager to connection manager so both use the same config
         self.connection_manager = MeshConnectionManager(cfg=self.config)
@@ -57,6 +65,10 @@ class MeshViewerGUI:
         self.auto_refresh_timer = None
         self.tabs = None
         self.battery_chart = None
+        self.telemetry_chart = None
+        self.telemetry_chart_container = None
+        self.telemetry_days_selector = None
+        self.telemetry_node_selector = None
 
         # MQTT
         self.mqtt_manager = MqttConnectionManager()
@@ -112,19 +124,29 @@ class MeshViewerGUI:
         )
 
     def setup_ui(self) -> None:
-        """Setup the main UI components."""
+        """Setup the UI - switches between simple and online mode based on config."""
         ui.page_title(self.config.get('app.page_title', 'Mesh Monitor - Meshtastic Network Monitor'))
         
-        with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
-            logo_path = self.config.get('app.logo_path')
-            ui.image(logo_path).style('max-width: 10vw; height: auto;')
-            with ui.column().classes('items-center'):
-                ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
-                ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
-            with ui.column().classes('items-right'):
-                ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
-                ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
+        app_mode = self.config.get('app.mode', 'simple').lower()
         
+        if app_mode == 'online':
+            # Online mode: requires login
+            self._setup_online_ui()
+        else:
+            # Simple mode (default): local network, no login
+            self._setup_simple_ui()
+
+    def _setup_online_ui(self) -> None:
+        """Setup UI for online/deployed mode with login requirement."""
+        # Create a persistent container for the entire page content
+        self.main_content = ui.column().classes('w-full')
+        
+        # Show login UI first - this will populate main_content
+        self._setup_login_ui()
+
+    def _setup_simple_ui(self) -> None:
+        """Setup the simple UI for local network use (no login required)."""
+        # Re-setup the main UI content
         def get_local_ip():
             try:
                 # Use UDP to avoid actual connection
@@ -136,6 +158,16 @@ class MeshViewerGUI:
             except Exception:
                 return "127.0.0.1"
 
+        with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
+            logo_path = self.config.get('app.logo_path')
+            ui.image(logo_path).style('max-width: 10vw; height: auto;')
+            with ui.column().classes('items-center'):
+                ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
+                ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+            with ui.column().classes('items-right'):
+                ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
+                ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
+        
         self.dark.enable()
         with ui.row().classes('w-full items-center justify-between gap-4'):
             ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
@@ -145,6 +177,7 @@ class MeshViewerGUI:
         with ui.tabs().classes('w-full') as self.tabs:
             ui.tab('Network View', icon='network_check')
             ui.tab('Battery History', icon='battery_charging_full')
+            ui.tab('Telemetry History', icon='sensors')
             ui.tab('Neighbour map', icon='share')
             autoresp_text = self.config.get_ui_text().get('autoresponse', {})
             autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
@@ -181,6 +214,9 @@ class MeshViewerGUI:
             with ui.tab_panel('Battery History'):
                 self._setup_battery_history_panel()
 
+            with ui.tab_panel('Telemetry History'):
+                self._setup_telemetry_history_panel()
+
             with ui.tab_panel('Neighbour map'):
                 self._setup_neighbour_map_panel()
             
@@ -198,7 +234,279 @@ class MeshViewerGUI:
                 # Neighbour views will be displayed via _setup_neighbour_map_panel which calls _update_neighbour_views()
             ui.timer(0.1, _trigger_initial_display, once=True)
 
-    
+    def _setup_login_ui(self) -> None:
+        """Setup the login UI and handle authentication."""
+        # Initialize main_content if not already done
+        if not self.main_content:
+            self.main_content = ui.column().classes('w-full')
+        
+        # Clear any existing content
+        self.main_content.clear()
+        
+        # Setup the login UI
+        self.login_ui = LoginUI(self.user_manager, self._on_login_success)
+        
+        # Temporarily add login to main_content
+        with self.main_content:
+            with ui.column().classes('w-full h-screen items-center justify-center bg-primary'):
+                login_card = ui.card().classes('w-full max-w-md')
+                with login_card:
+                    with ui.column().classes('w-full gap-4'):
+                        # Header
+                        ui.label('MeshMonitor').classes('text-h3 text-center')
+                        ui.label('Meshtastic Network Monitor').classes('text-subtitle1 text-center text-gray-400')
+                        
+                        with ui.separator().classes('my-2'):
+                            pass
+                        
+                        # Login form
+                        with ui.column().classes('w-full gap-2') as login_form:
+                            ui.label('Login').classes('text-h6')
+                            
+                            username_input = ui.input('Username').classes('w-full')
+                            password_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
+                            
+                            # Error message
+                            error_label = ui.label('').classes('text-red-500 text-caption')
+                            error_label.visible = False
+                            
+                            def handle_login():
+                                user = username_input.value.strip()
+                                pwd = password_input.value
+                                
+                                if not user or not pwd:
+                                    error_label.set_text('Username and password required')
+                                    error_label.visible = True
+                                    return
+                                
+                                if self.user_manager.authenticate(user, pwd):
+                                    error_label.visible = False
+                                    self._on_login_success(user)
+                                else:
+                                    error_label.set_text('Invalid username or password')
+                                    error_label.visible = True
+                                    password_input.value = ''
+                            
+                            # Login button
+                            ui.button('Login', on_click=handle_login).classes('w-full')
+                            
+                            # Allow Enter key to submit
+                            password_input.on('keydown.enter', handle_login)
+                            
+                            # Register section
+                            with ui.row().classes('w-full justify-center gap-2'):
+                                ui.label('New user?').classes('text-caption')
+                                
+                                def show_register():
+                                    login_form.visible = False
+                                    register_form.visible = True
+                                
+                                ui.button('Create account', on_click=show_register).props('flat').classes('text-caption text-blue-400 p-0 h-auto')
+                        
+                        # Registration form (initially hidden)
+                        with ui.column().classes('w-full gap-2') as register_form:
+                            register_form.visible = False
+                            
+                            ui.label('Create Account').classes('text-h6')
+                            
+                            reg_username_input = ui.input('Username').classes('w-full')
+                            reg_password_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
+                            reg_confirm_input = ui.input('Confirm Password', password=True, password_toggle_button=True).classes('w-full')
+                            
+                            register_error = ui.label('').classes('text-red-500 text-caption')
+                            register_error.visible = False
+                            
+                            def handle_register():
+                                new_user = reg_username_input.value.strip()
+                                new_pwd = reg_password_input.value
+                                confirm_pwd = reg_confirm_input.value
+                                
+                                # Validation
+                                if not new_user:
+                                    register_error.set_text('Username cannot be empty')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if len(new_user) < 3:
+                                    register_error.set_text('Username must be at least 3 characters')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if new_user in self.user_manager.get_all_users():
+                                    register_error.set_text('Username already exists')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if not new_pwd:
+                                    register_error.set_text('Password cannot be empty')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if len(new_pwd) < 6:
+                                    register_error.set_text('Password must be at least 6 characters')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if new_pwd != confirm_pwd:
+                                    register_error.set_text('Passwords do not match')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                # Register the user
+                                if self.user_manager.add_user(new_user, new_pwd):
+                                    register_error.set_text('Account created! Logging in...')
+                                    register_error.classes('text-green-500', remove='text-red-500')
+                                    register_error.visible = True
+                                    
+                                    # Auto-login after brief delay
+                                    def auto_login():
+                                        if self.user_manager.authenticate(new_user, new_pwd):
+                                            self._on_login_success(new_user)
+                                    
+                                    ui.timer(0.5, auto_login, once=True)
+                                else:
+                                    register_error.set_text('Registration failed')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                            
+                            ui.button('Register', on_click=handle_register).classes('w-full')
+                            
+                            # Toggle back to login
+                            with ui.row().classes('w-full justify-center gap-2'):
+                                ui.label('Already have an account?').classes('text-caption')
+                                
+                                def show_login():
+                                    register_form.visible = False
+                                    login_form.visible = True
+                                
+                                ui.button('Login', on_click=show_login).props('flat').classes('text-caption text-blue-400 p-0 h-auto')
+
+    def _on_login_success(self, username: str) -> None:
+        """Handle successful login and setup main UI."""
+        self.current_user = username
+        print(f"User {username} logged in successfully")
+        self._setup_online_main_ui()
+
+    def _setup_online_main_ui(self) -> None:
+        """Setup the main application UI after login (for online mode)."""
+        # Clear login UI
+        self.main_content.clear()
+        
+        # Re-setup the main UI content
+        def get_local_ip():
+            try:
+                # Use UDP to avoid actual connection
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
+                sock.close()
+                return ip
+            except Exception:
+                return "127.0.0.1"
+
+        with self.main_content:
+            # Header with user info and logout button
+            with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
+                logo_path = self.config.get('app.logo_path')
+                ui.image(logo_path).style('max-width: 10vw; height: auto;')
+                with ui.column().classes('items-center flex-1'):
+                    ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
+                    ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+                with ui.column().classes('items-end gap-2'):
+                    ui.label(f"Logged in as: {self.current_user}").classes('text-subtitle3')
+                    ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
+                    ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
+                    ui.button('Logout', on_click=self._handle_logout).props('flat').classes('text-white')
+            
+            self.dark.enable()
+            with ui.row().classes('w-full items-center justify-between gap-4'):
+                ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
+                ui.label(f"Server IP: {get_local_ip()}").classes('text-subtitle2 text-right')
+
+            # Create tabs for different views
+            with ui.tabs().classes('w-full') as self.tabs:
+                ui.tab('Network View', icon='network_check')
+                ui.tab('Battery History', icon='battery_charging_full')
+                ui.tab('Telemetry History', icon='sensors')
+                ui.tab('Neighbour map', icon='share')
+                autoresp_text = self.config.get_ui_text().get('autoresponse', {})
+                autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
+                self._autoresp_tab = ui.tab(autoresp_tab, icon='smart_toy')
+                automsg_text = self.config.get_ui_text().get('automessage', {})
+                automsg_tab = automsg_text.get('tab_title', 'Auto Message')
+                self._automsg_tab = ui.tab(automsg_tab, icon='schedule')
+
+            def _update_mesh_tab_state(_=None):
+                """Disable Auto Response/Message tabs when only connected via MQTT."""
+                mesh_only = self.connected  # True = Meshtastic connected
+                # disable = mqtt only (no meshtastic connection)
+                disable = (not self.connected) and self.mqtt_connected
+                for tab in (self._autoresp_tab, self._automsg_tab):
+                    if disable:
+                        tab.props('disable')
+                        tab.tooltip('Not available for MQTT-only connections')
+                    else:
+                        tab.props(remove='disable')
+
+            ui.timer(1.0, _update_mesh_tab_state)
+            
+            with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
+                with ui.tab_panel('Network View'):
+                    # Responsive layout: on small screens, connection panel on top; on large screens, nodes panel on left
+                    with ui.row().classes('w-full flex-col md:flex-row gap-4'):
+                        with ui.column().classes('w-full md:w-2/3 order-2 md:order-1'):
+                            self._setup_nodes_panel()
+                        with ui.column().classes('w-full md:w-1/4 order-1 md:order-2'):
+                            self._setup_connection_panel()
+                    # Increase minimum width for the dark mode switch by 30%
+                    ui.query('label:has(input[type="checkbox"])').style('min-width: 130%')
+                
+                with ui.tab_panel('Battery History'):
+                    self._setup_battery_history_panel()
+
+                with ui.tab_panel('Telemetry History'):
+                    self._setup_telemetry_history_panel()
+
+                with ui.tab_panel('Neighbour map'):
+                    self._setup_neighbour_map_panel()
+                
+                with ui.tab_panel(autoresp_tab):
+                    self._setup_autoresponse_panel()
+
+                with ui.tab_panel(automsg_tab):
+                    self._setup_automessage_panel()
+
+            # Defer display of persisted data until after event loop is initialized
+            if getattr(self, 'persisted_data_loaded', False):
+                def _trigger_initial_display():
+                    if self.mqtt_nodes_data:
+                        self._update_nodes_display()
+                    # Neighbour views will be displayed via _setup_neighbour_map_panel which calls _update_neighbour_views()
+                ui.timer(0.1, _trigger_initial_display, once=True)
+
+    def _handle_logout(self) -> None:
+        """Handle logout and return to login screen."""
+        print(f"User {self.current_user} logged out")
+        self.user_manager.logout()
+        self.current_user = None
+        
+        # Disconnect from mesh/MQTT
+        if self.connected:
+            self.disconnect()
+        if self.mqtt_connected:
+            self.disconnect_mqtt()
+        
+        # Clear UI and show login screen again
+        if self.main_content:
+            self.main_content.clear()
+            self._setup_login_ui()
+
     def _setup_connection_panel(self) -> None:
         """Setup the connection control panel."""
         ui_text = self.config.get_ui_text().get('connection', {})
@@ -339,6 +647,39 @@ class MeshViewerGUI:
             
             # Initial load
             self.update_battery_chart()
+
+    def _setup_telemetry_history_panel(self) -> None:
+        """Setup the telemetry history panel with CO2, temperature, and humidity graphs."""
+        with ui.card().classes('w-full'):
+            ui.label('Telemetry History').classes('text-h6 mb-4')
+            
+            # Controls
+            with ui.row().classes('w-full items-center gap-4 mb-4'):
+                self.telemetry_days_selector = ui.select(
+                    options={
+                        0.042: '1 Hour', 0.25: '6 Hours', 0.5: '12 Hours',
+                        1: '1 Day', 3: '3 Days', 7: '7 Days', 14: '14 Days', 30: '30 Days'
+                    },
+                    value=7,
+                    label='Time Period'
+                ).classes('w-32').on('update:model-value', lambda e: self.update_telemetry_chart())
+                
+                self.telemetry_node_selector = ui.select(
+                    options={},
+                    value=None,
+                    label='Node'
+                ).classes('flex-1').on('update:model-value', lambda e: self.update_telemetry_chart())
+                
+                ui.button('Refresh Chart', on_click=self.update_telemetry_chart).classes('w-32')
+            
+            # Chart container
+            self.telemetry_chart_container = ui.column().classes('w-full')
+            
+            # Data summary
+            self.telemetry_data_summary_container = ui.column().classes('w-full mt-4')
+            
+            # Initial load
+            self.update_telemetry_chart()
 
     def _setup_autoresponse_panel(self) -> None:
         """Setup the auto response (auto-react) settings panel.
@@ -1457,6 +1798,19 @@ class MeshViewerGUI:
                         ui.label(f"up {uptime_hours:4.1f} hrs").classes('text-sm')
                         channel_util = metrics.get('channelUtilization', 0.0)
                         ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption')
+                        
+                        # Display telemetry data if available
+                        co2 = metrics.get('co2')
+                        co2_temp = metrics.get('co2Temperature')
+                        co2_humidity = metrics.get('co2Humidity')
+                        if co2 is not None or co2_temp is not None or co2_humidity is not None:
+                            if co2 is not None:
+                                ui.label(f"CO₂: {co2:.0f} ppm").classes('text-caption')
+                            if co2_temp is not None:
+                                ui.label(f"Temp: {co2_temp:.1f}°C").classes('text-caption')
+                            if co2_humidity is not None:
+                                ui.label(f"Humidity: {co2_humidity:.1f}%").classes('text-caption')
+                    
                     ui.label(f"{ui_text.get('hw_label', 'HW')}: {hw_model}").classes('text-caption')
                     ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption')
                     if is_mqtt:
@@ -1571,6 +1925,33 @@ class MeshViewerGUI:
             color = "#bbbbbb" if self.dark.value else "#444444"
         ui.html(
             f'<span class="text-sm" style="color:{color};">Last Heard:<br>{last_heard_str}</span>'
+        )
+
+    def render_telemetry_string(self, node):
+        """Render telemetry data (CO2, temperature, humidity) on node card."""
+        metrics = node.get('deviceMetrics', {})
+        co2 = metrics.get('co2')
+        co2_temp = metrics.get('co2Temperature')
+        co2_humidity = metrics.get('co2Humidity')
+        
+        # If no telemetry data, don't render anything
+        if co2 is None and co2_temp is None and co2_humidity is None:
+            return
+        
+        # Build telemetry text
+        telemetry_lines = []
+        if co2 is not None:
+            telemetry_lines.append(f"CO₂: {co2:.0f} ppm")
+        if co2_temp is not None:
+            telemetry_lines.append(f"Temp: {co2_temp:.1f}°C")
+        if co2_humidity is not None:
+            telemetry_lines.append(f"Humidity: {co2_humidity:.1f}%")
+        
+        telemetry_html = "<br>".join(telemetry_lines)
+        
+        text_color = "#bbbbbb" if self.dark.value else "#666666"
+        ui.html(
+            f'<span class="text-sm" style="color:{text_color};">Telemetry:<br>{telemetry_html}</span>'
         )
 
     
@@ -1940,6 +2321,302 @@ class MeshViewerGUI:
         except Exception as e:
             print(f"Error updating battery chart: {e}")
             with self.battery_chart_container:
+                ui.label(f'Error loading chart: {str(e)}').classes('text-red-500 text-center')
+    
+    def update_telemetry_chart(self) -> None:
+        """Update the telemetry history chart (CO2, temperature, humidity)."""
+        try:
+            # Get data
+            days = self.telemetry_days_selector.value
+            df = self.data_persistence.get_telemetry_history(days)
+            print(f"DEBUG Telemetry: Days selected: {days}")
+            
+            # Update node selector with available nodes that have telemetry data
+            if df.empty:
+                available_nodes = {}
+            else:
+                available_nodes = {
+                    node_id: f"{df[df['node_id'] == node_id].iloc[0]['short_name']} ({node_id})"
+                    for node_id in df['node_id'].unique()
+                }
+            
+            self.telemetry_node_selector.options = available_nodes
+            
+            # Clear chart containers
+            self.telemetry_chart_container.clear()
+            self.telemetry_data_summary_container.clear()
+            self.telemetry_chart = None
+            print("DEBUG Telemetry: Containers cleared and chart reset")
+            
+            if df.empty:
+                # Show empty chart with full timespan
+                fig = go.Figure()
+                
+                # Calculate the full timespan for the selected period
+                from datetime import datetime, timedelta
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days)
+                
+                # Add empty traces
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='CO₂ (ppm)',
+                    line=dict(color='#FF6B6B', width=2),
+                    marker=dict(size=6, color='#FF6B6B', line=dict(width=1, color='white'))
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Temperature (°C)',
+                    yaxis='y2',
+                    line=dict(color='#4ECDC4', width=2),
+                    marker=dict(size=6, color='#4ECDC4', line=dict(width=1, color='white'))
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Humidity (%)',
+                    yaxis='y3',
+                    line=dict(color='#95E1D3', width=2),
+                    marker=dict(size=6, color='#95E1D3', line=dict(width=1, color='white'))
+                ))
+                
+                fig.update_layout(
+                    title=f'Telemetry History - {self._get_time_label(days)} (No Data)',
+                    xaxis_title='Time',
+                    yaxis=dict(
+                        title='CO₂ (ppm)', 
+                        side='left',
+                        range=[400, 2000],
+                        tickformat='.0f'
+                    ),
+                    yaxis2=dict(
+                        title='Temperature (°C)', 
+                        side='right', 
+                        overlaying='y',
+                        range=[-10, 50],
+                        tickformat='.1f'
+                    ),
+                    yaxis3=dict(
+                        title='Humidity (%)', 
+                        side='right',
+                        overlaying='y',
+                        anchor='free',
+                        position=1.15,
+                        range=[0, 100],
+                        tickformat='.0f'
+                    ),
+                    hovermode='x unified',
+                    template='plotly_dark' if self.dark.value else 'plotly_white',
+                    height=500,
+                    xaxis=dict(
+                        range=[start_time, end_time],
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                with self.telemetry_chart_container:
+                    ui.plotly(fig).classes('w-full')
+                with self.telemetry_data_summary_container:
+                    ui.label('No telemetry data available for the selected time period').classes('text-gray-500 text-center')
+                return
+            
+            # Filter by selected node if specified
+            selected_node = self.telemetry_node_selector.value
+            print(f"DEBUG Telemetry: Selected node: {selected_node}")
+            print(f"DEBUG Telemetry: Data shape before filtering: {df.shape}")
+            if selected_node:
+                df = df[df['node_id'] == selected_node]
+                print(f"DEBUG Telemetry: Data shape after filtering: {df.shape}")
+                # Remove duplicates - keep the latest entry for each timestamp
+                df = df.drop_duplicates(subset=['timestamp'], keep='last')
+                print(f"DEBUG Telemetry: Data shape after deduplication: {df.shape}")
+            
+            if df.empty:
+                # Show empty chart for selected node
+                fig = go.Figure()
+                from datetime import datetime, timedelta
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days)
+                
+                fig.add_trace(go.Scatter(x=[], y=[], mode='markers+lines', name='CO₂ (ppm)',
+                    line=dict(color='#FF6B6B', width=2), marker=dict(size=6, color='#FF6B6B')))
+                fig.add_trace(go.Scatter(x=[], y=[], mode='markers+lines', name='Temperature (°C)',
+                    yaxis='y2', line=dict(color='#4ECDC4', width=2), marker=dict(size=6, color='#4ECDC4')))
+                fig.add_trace(go.Scatter(x=[], y=[], mode='markers+lines', name='Humidity (%)',
+                    yaxis='y3', line=dict(color='#95E1D3', width=2), marker=dict(size=6, color='#95E1D3')))
+                
+                node_name = "Unknown Node"
+                if selected_node and not df.empty:
+                    node_name = df.iloc[0]['short_name']
+                
+                fig.update_layout(
+                    title=f'Telemetry History - {self._get_time_label(days)} - {node_name} (No Data)',
+                    xaxis_title='Time',
+                    yaxis=dict(title='CO₂ (ppm)', side='left', range=[400, 2000], tickformat='.0f'),
+                    yaxis2=dict(title='Temperature (°C)', side='right', overlaying='y', range=[-10, 50], tickformat='.1f'),
+                    yaxis3=dict(title='Humidity (%)', side='right', overlaying='y', anchor='free', position=1.15, range=[0, 100], tickformat='.0f'),
+                    hovermode='x unified',
+                    template='plotly_dark' if self.dark.value else 'plotly_white',
+                    height=500,
+                    xaxis=dict(range=[start_time, end_time], showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)'),
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                with self.telemetry_chart_container:
+                    ui.plotly(fig).classes('w-full')
+                with self.telemetry_data_summary_container:
+                    ui.label(f'No data available for {node_name} in the selected time period').classes('text-gray-500 text-center')
+                return
+            
+            # Create telemetry chart
+            fig = go.Figure()
+            
+            # Calculate the full timespan for the selected period
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            start_time = end_time - timedelta(days=days)
+            
+            print(f"DEBUG Telemetry: Plotting {len(df)} data points")
+            
+            # Add CO2 trace
+            co2_data = df['co2'].dropna()
+            if not co2_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=df[df['co2'].notna()]['timestamp'],
+                    y=co2_data.tolist(),
+                    mode='markers+lines',
+                    name='CO₂ (ppm)',
+                    line=dict(color='#FF6B6B', width=2),
+                    marker=dict(size=6, color='#FF6B6B', line=dict(width=1, color='#FF6B6B')),
+                    connectgaps=False
+                ))
+            
+            # Add temperature trace
+            temp_data = df['co2_temperature'].dropna()
+            if not temp_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=df[df['co2_temperature'].notna()]['timestamp'],
+                    y=temp_data.tolist(),
+                    mode='markers+lines',
+                    name='Temperature (°C)',
+                    yaxis='y2',
+                    line=dict(color='#4ECDC4', width=2),
+                    marker=dict(size=6, color='#4ECDC4', line=dict(width=1, color='#4ECDC4')),
+                    connectgaps=False
+                ))
+            
+            # Add humidity trace
+            humidity_data = df['co2_humidity'].dropna()
+            if not humidity_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=df[df['co2_humidity'].notna()]['timestamp'],
+                    y=humidity_data.tolist(),
+                    mode='markers+lines',
+                    name='Humidity (%)',
+                    yaxis='y3',
+                    line=dict(color='#95E1D3', width=2),
+                    marker=dict(size=6, color='#95E1D3', line=dict(width=1, color='#95E1D3')),
+                    connectgaps=False
+                ))
+            
+            # Update layout with multiple y-axes
+            fig.update_layout(
+                title=f'Telemetry History - {self._get_time_label(days)}' + (f' - {df.iloc[0]["short_name"]}' if selected_node else ''),
+                xaxis_title='Time',
+                yaxis=dict(
+                    title='CO₂ (ppm)', 
+                    side='left',
+                    range=[400, 2000],
+                    tickformat='.0f'
+                ),
+                yaxis2=dict(
+                    title='Temperature (°C)', 
+                    side='right', 
+                    overlaying='y',
+                    range=[-10, 50],
+                    tickformat='.1f'
+                ),
+                yaxis3=dict(
+                    title='Humidity (%)', 
+                    side='right',
+                    overlaying='y',
+                    anchor='free',
+                    position=1.15,
+                    range=[0, 100],
+                    tickformat='.0f'
+                ),
+                hovermode='x unified',
+                template='plotly_dark' if self.dark.value else 'plotly_white',
+                height=500,
+                xaxis=dict(
+                    range=[start_time, end_time],
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor='rgba(128,128,128,0.2)'
+                ),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            # Display chart
+            with self.telemetry_chart_container:
+                self.telemetry_chart = ui.plotly(fig).classes('w-full')
+                print(f"DEBUG Telemetry: Chart created/updated with {len(df)} data points")
+            
+            # Display data summary
+            with self.telemetry_data_summary_container:
+                with ui.row().classes('w-full gap-4'):
+                    # CO2 stats
+                    if not co2_data.empty:
+                        with ui.card().classes('flex-1'):
+                            ui.label('CO₂ Stats').classes('text-h6')
+                            ui.label(f'Min: {co2_data.min():.0f} ppm').classes('text-sm')
+                            ui.label(f'Max: {co2_data.max():.0f} ppm').classes('text-sm')
+                            ui.label(f'Avg: {co2_data.mean():.0f} ppm').classes('text-sm')
+                    
+                    # Temperature stats
+                    if not temp_data.empty:
+                        with ui.card().classes('flex-1'):
+                            ui.label('Temperature Stats').classes('text-h6')
+                            ui.label(f'Min: {temp_data.min():.1f}°C').classes('text-sm')
+                            ui.label(f'Max: {temp_data.max():.1f}°C').classes('text-sm')
+                            ui.label(f'Avg: {temp_data.mean():.1f}°C').classes('text-sm')
+                    
+                    # Humidity stats
+                    if not humidity_data.empty:
+                        with ui.card().classes('flex-1'):
+                            ui.label('Humidity Stats').classes('text-h6')
+                            ui.label(f'Min: {humidity_data.min():.1f}%').classes('text-sm')
+                            ui.label(f'Max: {humidity_data.max():.1f}%').classes('text-sm')
+                            ui.label(f'Avg: {humidity_data.mean():.1f}%').classes('text-sm')
+                        
+        except Exception as e:
+            print(f"Error updating telemetry chart: {e}")
+            with self.telemetry_chart_container:
                 ui.label(f'Error loading chart: {str(e)}').classes('text-red-500 text-center')
     
     def run(self, **kwargs) -> None:

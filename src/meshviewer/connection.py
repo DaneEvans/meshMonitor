@@ -914,6 +914,14 @@ class MqttConnectionManager:
                 if "uptime_seconds" in payload:
                     metrics["uptimeSeconds"] = int(payload["uptime_seconds"])
 
+                # Environment telemetry fields (co2, temperature, humidity)
+                if "co2" in payload:
+                    metrics["co2"] = float(payload["co2"])
+                if "co2_temperature" in payload:
+                    metrics["co2Temperature"] = float(payload["co2_temperature"])
+                if "co2_humidity" in payload:
+                    metrics["co2Humidity"] = float(payload["co2_humidity"])
+
                 node["deviceMetrics"] = metrics
 
                 # Optional signal quality

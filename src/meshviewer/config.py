@@ -22,7 +22,11 @@ class ConfigManager:
             project_root = Path(__file__).parent.parent.parent
             config_path = project_root / "config.yaml"
         
-        self.config_path = Path(config_path.strip())
+        # Handle both string and Path objects
+        if isinstance(config_path, str):
+            self.config_path = Path(config_path.strip())
+        else:
+            self.config_path = Path(config_path)
         self._config: Dict[str, Any] = {}
         self.load_config()
     
