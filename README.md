@@ -34,6 +34,12 @@ MeshMonitor using in default configuration
 
 3. **Open your browser to:** `http://localhost:8080`
 
+4. **Choose your deployment mode:**
+   - **Simple mode** (default, local network): Direct access, no login needed
+   - **Online mode** (deployed/cloud): Login required for security
+   
+   See [configuration guide](./docs/login_system.md) to switch modes in `config.yaml`
+
 ## Features
 
 - 🌐 **Web Interface**: Modern responsive UI with real-time monitoring
@@ -43,6 +49,7 @@ MeshMonitor using in default configuration
 - 🖥️ **CLI Interface**: Terminal-based monitoring for automation
 - 🔌 **Multiple Connections**: TCP and Serial support with auto-fallback
 - 🎨 **Customizable**: Themes, colors, and UI text via config.yaml
+- 👥 **Multi-User Login**: Secure authentication with multiple user accounts
 
 ## Documentation
 

@@ -1,13 +1,20 @@
+#!/usr/bin/env python3
 """
 Main GUI module for MeshViewer using NiceGUI.
 """
 from nicegui import ui
 from typing import Optional, Dict, Any
-from meshviewer.connection import MeshConnectionManager
+from meshviewer.connection import MeshConnectionManager, MqttConnectionManager
 from meshviewer.interface import MeshInterface
 from meshviewer.config import ConfigManager
 from meshviewer.data_persistence import DataPersistence
+from gui.user_manager import UserManager
+from gui.login import LoginUI
+import json
+import math
 import time
+import traceback
+import threading
 import plotly.graph_objects as go
 import socket
 
@@ -23,11 +30,21 @@ class MeshViewerGUI:
 
         self.set_theme()
 
+        # Lock to serialize UI element mutations and prevent NiceGUI elements dict races
+        self._ui_update_lock = threading.Lock()
+
+        # User management
+        self.user_manager = UserManager()
+        self.current_user: Optional[str] = None
+        self.login_ui: Optional[LoginUI] = None
+        self.main_content = None  # Will hold the main UI container
+
         # Pass shared ConfigManager to connection manager so both use the same config
         self.connection_manager = MeshConnectionManager(cfg=self.config)
         self.mesh_interface: Optional[MeshInterface] = None
         self.connected = False
         self.show_all_nodes = True
+        self.show_mqtt_nodes = True
         self.nodes_data: Dict[str, Any] = {}
         
         # Initialize data persistence
@@ -48,6 +65,50 @@ class MeshViewerGUI:
         self.auto_refresh_timer = None
         self.tabs = None
         self.battery_chart = None
+        self.telemetry_chart = None
+        self.telemetry_chart_container = None
+        self.telemetry_days_selector = None
+        self.telemetry_node_selector = None
+
+        # MQTT
+        self.mqtt_manager = MqttConnectionManager()
+        self.mqtt_manager.set_on_update(self._on_mqtt_update)
+        self.mqtt_connected = False
+        self.mqtt_nodes_data: Dict[str, Any] = {}
+        self.mqtt_status = None  # label set in setup_ui
+        self.mqtt_host_input = None
+        self.mqtt_user_input = None
+        self.mqtt_pass_input = None
+        self.mqtt_topic_input = None
+        self.mqtt_reporters_container = None
+        self.neighbour_packets = []
+        self.neighbour_log_container = None
+        self.neighbour_map_container = None
+        self.neighbour_unknown_container = None
+        self.reporter_aliases: Dict[str, str] = self.data_persistence.get_reporter_aliases()
+        self.reporter_visibility: Dict[str, bool] = self.data_persistence.get_reporter_visibility()
+        self._known_reporting_nodes: list[str] = []
+        self._known_reporting_prefixes: Dict[str, str] = {}
+
+        # Pre-populate with last-known node state so the display isn't empty on restart
+        persisted = self.data_persistence.get_last_known_nodes()
+        if persisted:
+            self.mqtt_nodes_data = persisted
+            # Seed the MQTT manager's internal cache so live updates merge into persisted data
+            # rather than replacing it wholesale on the first packet
+            with self.mqtt_manager._lock:
+                for nid, node in persisted.items():
+                    if nid not in self.mqtt_manager._nodes:
+                        self.mqtt_manager._nodes[nid] = dict(node)
+
+        persisted_neighbours = self.data_persistence.get_neighbour_packets()
+        if persisted_neighbours:
+            self.neighbour_packets = persisted_neighbours
+            self.mqtt_manager.set_neighbor_packets(persisted_neighbours)
+            print(f"DEBUG: Loaded {len(persisted_neighbours)} persisted neighbour packets into mqtt_manager")
+
+        # Mark that persisted data has been loaded; will trigger display in setup_ui
+        self.persisted_data_loaded = True
 
     def set_theme(self):
         """Set NiceGUI theme colors and mode using native theming."""
@@ -63,19 +124,29 @@ class MeshViewerGUI:
         )
 
     def setup_ui(self) -> None:
-        """Setup the main UI components."""
+        """Setup the UI - switches between simple and online mode based on config."""
         ui.page_title(self.config.get('app.page_title', 'Mesh Monitor - Meshtastic Network Monitor'))
         
-        with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
-            logo_path = self.config.get('app.logo_path')
-            ui.image(logo_path).style('max-width: 10vw; height: auto;')
-            with ui.column().classes('items-center'):
-                ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
-                ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
-            with ui.column().classes('items-right'):
-                ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
-                ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
+        app_mode = self.config.get('app.mode', 'simple').lower()
         
+        if app_mode == 'online':
+            # Online mode: requires login
+            self._setup_online_ui()
+        else:
+            # Simple mode (default): local network, no login
+            self._setup_simple_ui()
+
+    def _setup_online_ui(self) -> None:
+        """Setup UI for online/deployed mode with login requirement."""
+        # Create a persistent container for the entire page content
+        self.main_content = ui.column().classes('w-full')
+        
+        # Show login UI first - this will populate main_content
+        self._setup_login_ui()
+
+    def _setup_simple_ui(self) -> None:
+        """Setup the simple UI for local network use (no login required)."""
+        # Re-setup the main UI content
         def get_local_ip():
             try:
                 # Use UDP to avoid actual connection
@@ -87,6 +158,16 @@ class MeshViewerGUI:
             except Exception:
                 return "127.0.0.1"
 
+        with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
+            logo_path = self.config.get('app.logo_path')
+            ui.image(logo_path).style('max-width: 10vw; height: auto;')
+            with ui.column().classes('items-center'):
+                ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
+                ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+            with ui.column().classes('items-right'):
+                ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
+                ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
+        
         self.dark.enable()
         with ui.row().classes('w-full items-center justify-between gap-4'):
             ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
@@ -96,12 +177,28 @@ class MeshViewerGUI:
         with ui.tabs().classes('w-full') as self.tabs:
             ui.tab('Network View', icon='network_check')
             ui.tab('Battery History', icon='battery_charging_full')
+            ui.tab('Telemetry History', icon='sensors')
+            ui.tab('Neighbour map', icon='share')
             autoresp_text = self.config.get_ui_text().get('autoresponse', {})
             autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
-            ui.tab(autoresp_tab, icon='smart_toy')
+            self._autoresp_tab = ui.tab(autoresp_tab, icon='smart_toy')
             automsg_text = self.config.get_ui_text().get('automessage', {})
             automsg_tab = automsg_text.get('tab_title', 'Auto Message')
-            ui.tab(automsg_tab, icon='schedule')
+            self._automsg_tab = ui.tab(automsg_tab, icon='schedule')
+
+        def _update_mesh_tab_state(_=None):
+            """Disable Auto Response/Message tabs when only connected via MQTT."""
+            mesh_only = self.connected  # True = Meshtastic connected
+            # disable = mqtt only (no meshtastic connection)
+            disable = (not self.connected) and self.mqtt_connected
+            for tab in (self._autoresp_tab, self._automsg_tab):
+                if disable:
+                    tab.props('disable')
+                    tab.tooltip('Not available for MQTT-only connections')
+                else:
+                    tab.props(remove='disable')
+
+        ui.timer(1.0, _update_mesh_tab_state)
         
         with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
             with ui.tab_panel('Network View'):
@@ -116,15 +213,300 @@ class MeshViewerGUI:
             
             with ui.tab_panel('Battery History'):
                 self._setup_battery_history_panel()
+
+            with ui.tab_panel('Telemetry History'):
+                self._setup_telemetry_history_panel()
+
+            with ui.tab_panel('Neighbour map'):
+                self._setup_neighbour_map_panel()
             
             with ui.tab_panel(autoresp_tab):
                 self._setup_autoresponse_panel()
 
             with ui.tab_panel(automsg_tab):
                 self._setup_automessage_panel()
-            
 
-    
+        # Defer display of persisted data until after event loop is initialized
+        if getattr(self, 'persisted_data_loaded', False):
+            def _trigger_initial_display():
+                if self.mqtt_nodes_data:
+                    self._update_nodes_display()
+                # Neighbour views will be displayed via _setup_neighbour_map_panel which calls _update_neighbour_views()
+            ui.timer(0.1, _trigger_initial_display, once=True)
+
+    def _setup_login_ui(self) -> None:
+        """Setup the login UI and handle authentication."""
+        # Initialize main_content if not already done
+        if not self.main_content:
+            self.main_content = ui.column().classes('w-full')
+        
+        # Clear any existing content
+        self.main_content.clear()
+        
+        # Setup the login UI
+        self.login_ui = LoginUI(self.user_manager, self._on_login_success)
+        
+        # Temporarily add login to main_content
+        with self.main_content:
+            with ui.column().classes('w-full h-screen items-center justify-center bg-primary'):
+                login_card = ui.card().classes('w-full max-w-md')
+                with login_card:
+                    with ui.column().classes('w-full gap-4'):
+                        # Header
+                        ui.label('MeshMonitor').classes('text-h3 text-center')
+                        ui.label('Meshtastic Network Monitor').classes('text-subtitle1 text-center text-gray-400')
+                        
+                        with ui.separator().classes('my-2'):
+                            pass
+                        
+                        # Login form
+                        with ui.column().classes('w-full gap-2') as login_form:
+                            ui.label('Login').classes('text-h6')
+                            
+                            username_input = ui.input('Username').classes('w-full')
+                            password_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
+                            
+                            # Error message
+                            error_label = ui.label('').classes('text-red-500 text-caption')
+                            error_label.visible = False
+                            
+                            def handle_login():
+                                user = username_input.value.strip()
+                                pwd = password_input.value
+                                
+                                if not user or not pwd:
+                                    error_label.set_text('Username and password required')
+                                    error_label.visible = True
+                                    return
+                                
+                                if self.user_manager.authenticate(user, pwd):
+                                    error_label.visible = False
+                                    self._on_login_success(user)
+                                else:
+                                    error_label.set_text('Invalid username or password')
+                                    error_label.visible = True
+                                    password_input.value = ''
+                            
+                            # Login button
+                            ui.button('Login', on_click=handle_login).classes('w-full')
+                            
+                            # Allow Enter key to submit
+                            password_input.on('keydown.enter', handle_login)
+                            
+                            # Register section
+                            with ui.row().classes('w-full justify-center gap-2'):
+                                ui.label('New user?').classes('text-caption')
+                                
+                                def show_register():
+                                    login_form.visible = False
+                                    register_form.visible = True
+                                
+                                ui.button('Create account', on_click=show_register).props('flat').classes('text-caption text-blue-400 p-0 h-auto')
+                        
+                        # Registration form (initially hidden)
+                        with ui.column().classes('w-full gap-2') as register_form:
+                            register_form.visible = False
+                            
+                            ui.label('Create Account').classes('text-h6')
+                            
+                            reg_username_input = ui.input('Username').classes('w-full')
+                            reg_password_input = ui.input('Password', password=True, password_toggle_button=True).classes('w-full')
+                            reg_confirm_input = ui.input('Confirm Password', password=True, password_toggle_button=True).classes('w-full')
+                            
+                            register_error = ui.label('').classes('text-red-500 text-caption')
+                            register_error.visible = False
+                            
+                            def handle_register():
+                                new_user = reg_username_input.value.strip()
+                                new_pwd = reg_password_input.value
+                                confirm_pwd = reg_confirm_input.value
+                                
+                                # Validation
+                                if not new_user:
+                                    register_error.set_text('Username cannot be empty')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if len(new_user) < 3:
+                                    register_error.set_text('Username must be at least 3 characters')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if new_user in self.user_manager.get_all_users():
+                                    register_error.set_text('Username already exists')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if not new_pwd:
+                                    register_error.set_text('Password cannot be empty')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if len(new_pwd) < 6:
+                                    register_error.set_text('Password must be at least 6 characters')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                if new_pwd != confirm_pwd:
+                                    register_error.set_text('Passwords do not match')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                                    return
+                                
+                                # Register the user
+                                if self.user_manager.add_user(new_user, new_pwd):
+                                    register_error.set_text('Account created! Logging in...')
+                                    register_error.classes('text-green-500', remove='text-red-500')
+                                    register_error.visible = True
+                                    
+                                    # Auto-login after brief delay
+                                    def auto_login():
+                                        if self.user_manager.authenticate(new_user, new_pwd):
+                                            self._on_login_success(new_user)
+                                    
+                                    ui.timer(0.5, auto_login, once=True)
+                                else:
+                                    register_error.set_text('Registration failed')
+                                    register_error.classes('text-red-500', remove='text-green-500')
+                                    register_error.visible = True
+                            
+                            ui.button('Register', on_click=handle_register).classes('w-full')
+                            
+                            # Toggle back to login
+                            with ui.row().classes('w-full justify-center gap-2'):
+                                ui.label('Already have an account?').classes('text-caption')
+                                
+                                def show_login():
+                                    register_form.visible = False
+                                    login_form.visible = True
+                                
+                                ui.button('Login', on_click=show_login).props('flat').classes('text-caption text-blue-400 p-0 h-auto')
+
+    def _on_login_success(self, username: str) -> None:
+        """Handle successful login and setup main UI."""
+        self.current_user = username
+        print(f"User {username} logged in successfully")
+        self._setup_online_main_ui()
+
+    def _setup_online_main_ui(self) -> None:
+        """Setup the main application UI after login (for online mode)."""
+        # Clear login UI
+        self.main_content.clear()
+        
+        # Re-setup the main UI content
+        def get_local_ip():
+            try:
+                # Use UDP to avoid actual connection
+                sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                sock.connect(("8.8.8.8", 80))
+                ip = sock.getsockname()[0]
+                sock.close()
+                return ip
+            except Exception:
+                return "127.0.0.1"
+
+        with self.main_content:
+            # Header with user info and logout button
+            with ui.row().classes('w-full items-center justify-between p-4 bg-primary text-white'):
+                logo_path = self.config.get('app.logo_path')
+                ui.image(logo_path).style('max-width: 10vw; height: auto;')
+                with ui.column().classes('items-center flex-1'):
+                    ui.label(self.config.get('app.title', 'Mesh Monitor')).classes('text-h4')
+                    ui.label(self.config.get('app.subtitle', 'Meshtastic Network Monitor')).classes('text-subtitle2')
+                with ui.column().classes('items-end gap-2'):
+                    ui.label(f"Logged in as: {self.current_user}").classes('text-subtitle3')
+                    ui.label(self.config.get('app.contactname', 'Dane Evans')).classes('text-subtitle2')
+                    ui.label(self.config.get('app.contactsite', 'https://meshtastic.org/')).classes('text-subtitle3')
+                    ui.button('Logout', on_click=self._handle_logout).props('flat').classes('text-white')
+            
+            self.dark.enable()
+            with ui.row().classes('w-full items-center justify-between gap-4'):
+                ui.switch('Dark mode').bind_value(self.dark).on('update:model-value', lambda _: self.refresh_nodes())
+                ui.label(f"Server IP: {get_local_ip()}").classes('text-subtitle2 text-right')
+
+            # Create tabs for different views
+            with ui.tabs().classes('w-full') as self.tabs:
+                ui.tab('Network View', icon='network_check')
+                ui.tab('Battery History', icon='battery_charging_full')
+                ui.tab('Telemetry History', icon='sensors')
+                ui.tab('Neighbour map', icon='share')
+                autoresp_text = self.config.get_ui_text().get('autoresponse', {})
+                autoresp_tab = autoresp_text.get('tab_title', 'Auto Response')
+                self._autoresp_tab = ui.tab(autoresp_tab, icon='smart_toy')
+                automsg_text = self.config.get_ui_text().get('automessage', {})
+                automsg_tab = automsg_text.get('tab_title', 'Auto Message')
+                self._automsg_tab = ui.tab(automsg_tab, icon='schedule')
+
+            def _update_mesh_tab_state(_=None):
+                """Disable Auto Response/Message tabs when only connected via MQTT."""
+                mesh_only = self.connected  # True = Meshtastic connected
+                # disable = mqtt only (no meshtastic connection)
+                disable = (not self.connected) and self.mqtt_connected
+                for tab in (self._autoresp_tab, self._automsg_tab):
+                    if disable:
+                        tab.props('disable')
+                        tab.tooltip('Not available for MQTT-only connections')
+                    else:
+                        tab.props(remove='disable')
+
+            ui.timer(1.0, _update_mesh_tab_state)
+            
+            with ui.tab_panels(self.tabs, value='Network View').classes('w-full'):
+                with ui.tab_panel('Network View'):
+                    # Responsive layout: on small screens, connection panel on top; on large screens, nodes panel on left
+                    with ui.row().classes('w-full flex-col md:flex-row gap-4'):
+                        with ui.column().classes('w-full md:w-2/3 order-2 md:order-1'):
+                            self._setup_nodes_panel()
+                        with ui.column().classes('w-full md:w-1/4 order-1 md:order-2'):
+                            self._setup_connection_panel()
+                    # Increase minimum width for the dark mode switch by 30%
+                    ui.query('label:has(input[type="checkbox"])').style('min-width: 130%')
+                
+                with ui.tab_panel('Battery History'):
+                    self._setup_battery_history_panel()
+
+                with ui.tab_panel('Telemetry History'):
+                    self._setup_telemetry_history_panel()
+
+                with ui.tab_panel('Neighbour map'):
+                    self._setup_neighbour_map_panel()
+                
+                with ui.tab_panel(autoresp_tab):
+                    self._setup_autoresponse_panel()
+
+                with ui.tab_panel(automsg_tab):
+                    self._setup_automessage_panel()
+
+            # Defer display of persisted data until after event loop is initialized
+            if getattr(self, 'persisted_data_loaded', False):
+                def _trigger_initial_display():
+                    if self.mqtt_nodes_data:
+                        self._update_nodes_display()
+                    # Neighbour views will be displayed via _setup_neighbour_map_panel which calls _update_neighbour_views()
+                ui.timer(0.1, _trigger_initial_display, once=True)
+
+    def _handle_logout(self) -> None:
+        """Handle logout and return to login screen."""
+        print(f"User {self.current_user} logged out")
+        self.user_manager.logout()
+        self.current_user = None
+        
+        # Disconnect from mesh/MQTT
+        if self.connected:
+            self.disconnect()
+        if self.mqtt_connected:
+            self.disconnect_mqtt()
+        
+        # Clear UI and show login screen again
+        if self.main_content:
+            self.main_content.clear()
+            self._setup_login_ui()
+
     def _setup_connection_panel(self) -> None:
         """Setup the connection control panel."""
         ui_text = self.config.get_ui_text().get('connection', {})
@@ -157,6 +539,50 @@ class MeshViewerGUI:
                 ui.button('Disconnect', on_click=self.disconnect).classes('flex-1').bind_visibility_from(self, 'connected')
             
             self.connection_status = ui.label(ui_text.get('disconnected_status', 'Disconnected')).classes('text-caption')
+
+        # ── MQTT connection card ────────────────────────────────────────
+        with ui.card().classes('w-full mt-2'):
+            ui.label('MQTT Connection').classes('text-h6')
+            mqtt_defaults = self.config.get_mqtt_defaults()
+            with ui.row().classes('w-full items-center gap-2 flex-nowrap'):
+                self.mqtt_host_input = ui.input(
+                    'Broker URL',
+                    value=mqtt_defaults.get('default_host', ''),
+                    placeholder='hostname or mqtt://host:1883',
+                ).classes('flex-1 min-w-0')
+            with ui.row().classes('w-full items-center gap-2'):
+                self.mqtt_user_input = ui.input(
+                    'Username',
+                    value=mqtt_defaults.get('default_username', ''),
+                ).classes('flex-1')
+                self.mqtt_pass_input = ui.input(
+                    'Password',
+                    value=mqtt_defaults.get('default_password', ''),
+                    password=True,
+                    password_toggle_button=True,
+                ).classes('flex-1')
+            with ui.row().classes('w-full items-center gap-2'):
+                self.mqtt_topic_input = ui.input(
+                    'Topic',
+                    value=mqtt_defaults.get('default_topic', '#'),
+                    placeholder='# (all topics)',
+                ).classes('flex-1')
+            with ui.row().classes('w-full gap-2'):
+                ui.button('Connect MQTT', on_click=self.connect_mqtt).classes('flex-1').bind_visibility_from(self, 'mqtt_connected', lambda v: not v)
+                ui.button('Disconnect MQTT', on_click=self.disconnect_mqtt).classes('flex-1').bind_visibility_from(self, 'mqtt_connected')
+            self.mqtt_status = ui.label('MQTT: Disconnected').classes('text-caption')
+
+            with ui.separator().classes('my-2'):
+                pass
+            ui.label('Reporting node nicknames').classes('text-subtitle2')
+            ui.label('Used in compact topic display: reported by <nickname>: prefix-channel').classes('text-caption text-gray-500')
+            self.mqtt_reporters_container = ui.column().classes('w-full gap-1')
+            self._refresh_mqtt_reporters_ui()
+
+            def try_mqtt_autoconnect():
+                if not self.mqtt_connected and self.config.get('mqtt.default_host', '').strip():
+                    self.connect_mqtt()
+            ui.timer(0.5, try_mqtt_autoconnect, once=True)
     
     def _setup_nodes_panel(self) -> None:
         """Setup the nodes display panel."""
@@ -165,39 +591,15 @@ class MeshViewerGUI:
         with ui.card().classes('w-full'):
             # Node count display at the top
             def get_node_count_info(_=None):
-                if not self.connected or not self.mesh_interface or not hasattr(self.mesh_interface, 'interface'):
-                    return "Total Nodes: 0 | Active (3h): 0"
-
-                # Debounce display until values are final (avoid showing intermediate counts as the mesh loads)
-                nodes = list(self.mesh_interface.interface.nodes.values())
-                total_nodes = len(nodes)
-
-                # Don't show count unless mesh info is 'stable' (i.e. mesh is fully loaded and not in early phases)
-
-                # "Sticky" previous values for display
-                if not hasattr(self, '_last_node_count_info'):
-                    self._last_node_count_info = None
-                    self._stable_node_counts = (0, 0)
-                    self._last_update_time = 0
-
-                current_time = int(time.time())
-                three_hours_ago = current_time - (self.active_threshold * 3600)
-                active_nodes = sum(1 for node in nodes if 'lastHeard' in node and node['lastHeard'] >= three_hours_ago)
-
-                # Only update if both counts appear final (i.e. not in the process of loading more nodes)
-                # Simple debounce: only update if the value is different after a short interval
-                node_tuple = (active_nodes, total_nodes)
-                now = time.time()
-                if node_tuple != self._stable_node_counts:
-                    self._stable_node_counts = node_tuple
-                    self._last_update_time = now
-                    return ''  # Blank out label until stable, hide in-between values
-                elif now - self._last_update_time < 1.0:
-                    return ''  # Wait at least 1s at stable value before displaying
-                else:
-                    info_str = f"Nodes online: {active_nodes}/{total_nodes}"
-                    self._last_node_count_info = info_str
-                    return info_str
+                visible_nodes = self._get_visible_nodes_for_display()
+                total_nodes = len(visible_nodes)
+                active_cutoff = int(time.time()) - int(self.active_threshold * 3600)
+                active_nodes = sum(
+                    1
+                    for _, node in visible_nodes
+                    if int((node or {}).get('lastHeard') or 0) >= active_cutoff
+                )
+                return f"Total Nodes: {total_nodes} | Active ({self.active_threshold}h): {active_nodes}"
 
             self.node_count_label = ui.label(get_node_count_info()).classes('text-h6 text-center w-full mb-2')
             self.node_count_label.bind_text_from(self, 'connected', get_node_count_info)
@@ -207,9 +609,11 @@ class MeshViewerGUI:
                 self.nodes_title = ui.label(ui_text.get('title_favorites', 'Favourite Nodes')).classes('text-h6')
                 self.nodes_title.bind_text_from(self, 'show_all_nodes', lambda v: ui_text.get('title_all', 'All Mesh Nodes') if v else ui_text.get('title_favorites', 'Favourite Nodes'))
                 self.show_all_toggle = ui.checkbox('Show all Nodes', value=False).bind_value(self, 'show_all_nodes').on('update:model-value', lambda e: self.refresh_nodes())
+                ui.checkbox('Include MQTT', value=True).bind_value(self, 'show_mqtt_nodes').on('update:model-value', lambda e: self.refresh_nodes())
             
             self.nodes_container = ui.column().classes('w-full')
             self.refresh_nodes_button = ui.button('Refresh', on_click=self.refresh_nodes).bind_visibility_from(self, 'connected')
+
     
     def _setup_battery_history_panel(self) -> None:
         """Setup the battery history panel."""
@@ -243,6 +647,39 @@ class MeshViewerGUI:
             
             # Initial load
             self.update_battery_chart()
+
+    def _setup_telemetry_history_panel(self) -> None:
+        """Setup the telemetry history panel with CO2, temperature, and humidity graphs."""
+        with ui.card().classes('w-full'):
+            ui.label('Telemetry History').classes('text-h6 mb-4')
+            
+            # Controls
+            with ui.row().classes('w-full items-center gap-4 mb-4'):
+                self.telemetry_days_selector = ui.select(
+                    options={
+                        0.042: '1 Hour', 0.25: '6 Hours', 0.5: '12 Hours',
+                        1: '1 Day', 3: '3 Days', 7: '7 Days', 14: '14 Days', 30: '30 Days'
+                    },
+                    value=7,
+                    label='Time Period'
+                ).classes('w-32').on('update:model-value', lambda e: self.update_telemetry_chart())
+                
+                self.telemetry_node_selector = ui.select(
+                    options={},
+                    value=None,
+                    label='Node'
+                ).classes('flex-1').on('update:model-value', lambda e: self.update_telemetry_chart())
+                
+                ui.button('Refresh Chart', on_click=self.update_telemetry_chart).classes('w-32')
+            
+            # Chart container
+            self.telemetry_chart_container = ui.column().classes('w-full')
+            
+            # Data summary
+            self.telemetry_data_summary_container = ui.column().classes('w-full mt-4')
+            
+            # Initial load
+            self.update_telemetry_chart()
 
     def _setup_autoresponse_panel(self) -> None:
         """Setup the auto response (auto-react) settings panel.
@@ -438,6 +875,565 @@ class MeshViewerGUI:
             _render_rows()
             ui.timer(1.0, _refresh_status)
             _refresh_status()
+
+    def _setup_neighbour_map_panel(self) -> None:
+        """Setup Neighbour map tab with packet log and neighbor map sections."""
+        with ui.column().classes('w-full gap-4'):
+            with ui.row().classes('w-full gap-4 flex-col lg:flex-row items-start'):
+                with ui.card().classes('w-full lg:flex-1'):
+                    ui.label('map').classes('text-h6')
+                    ui.label('Latest reported neighbour links by node').classes('text-caption text-gray-500')
+                    self.neighbour_map_container = ui.column().classes('w-full gap-1')
+
+                with ui.card().classes('w-full lg:w-80'):
+                    ui.label('visible, but neighbours not known').classes('text-h6')
+                    ui.label('Last seen within 3 hours, and neither reports neighbours nor appears in any latest neighbour list').classes('text-caption text-gray-500')
+                    self.neighbour_unknown_container = ui.column().classes('w-full gap-1')
+
+            with ui.expansion('log', value=False).classes('w-full'):
+                ui.label('Collected neighbourinfo MQTT packets').classes('text-caption text-gray-500')
+                self.neighbour_log_container = ui.column().classes('w-full gap-1')
+
+        self._update_neighbour_views()
+
+    @staticmethod
+    def _parse_mqtt_topic(topic: str) -> Dict[str, str]:
+        """Parse MQTT topic into prefix/channel/reporter components when possible."""
+        raw = str(topic or '').strip().strip('/')
+        if not raw:
+            return {'prefix': '', 'channel': '', 'reporter': ''}
+
+        parts = [p for p in raw.split('/') if p]
+        reporter = parts[-1] if parts else ''
+        prefix = ''
+        channel = ''
+
+        # Pattern: <prefix>/<port>/json/<channel>/<reporter>
+        # Example: msh/ANZ/flamingo/2/json/CRS_INFRA/!a0cb10f8
+        for i in range(len(parts) - 3):
+            if parts[i].isdigit() and parts[i + 1].lower() == 'json':
+                prefix = '/'.join(parts[:i])
+                channel = parts[i + 2]
+                break
+
+        # Best-effort fallback when pattern differs
+        if not channel and len(parts) >= 2:
+            channel = parts[-2]
+        if not prefix and len(parts) >= 4:
+            prefix = '/'.join(parts[:-4])
+
+        return {'prefix': prefix, 'channel': channel, 'reporter': reporter}
+
+    def _get_reporter_name(self, reporter_id: str) -> str:
+        """Return reporter nickname when set, else raw reporter id."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return ''
+        alias = str(self.reporter_aliases.get(key, '') or '').strip()
+        return alias if alias else key
+
+    def _format_mqtt_topic_compact(self, topic: str) -> str:
+        """Build compact MQTT path display: 🌉 nickname nodeID: prefix-channel."""
+        parsed = self._parse_mqtt_topic(topic)
+        reporter_id = parsed.get('reporter', '')
+        alias = str(self.reporter_aliases.get(reporter_id, '') or '').strip()
+        prefix = parsed.get('prefix', '')
+        channel = parsed.get('channel', '')
+
+        prefix_channel = ''
+        if prefix and channel:
+            prefix_channel = f'{prefix}-{channel}'
+        elif prefix:
+            prefix_channel = prefix
+        elif channel:
+            prefix_channel = channel
+        else:
+            parts = [p for p in str(topic or '').split('/') if p]
+            prefix_channel = '/'.join(parts[-3:]) if parts else ''
+
+        if alias and reporter_id:
+            reporter_display = f'\U0001f309 {alias} {reporter_id}'
+        elif reporter_id:
+            reporter_display = f'\U0001f309 {reporter_id}'
+        else:
+            reporter_display = ''
+
+        if reporter_display and prefix_channel:
+            return f'{reporter_display}: {prefix_channel}'
+        return reporter_display or prefix_channel
+
+    def _collect_reporting_nodes(self) -> list[str]:
+        """Collect all known MQTT reporting node ids from topic paths."""
+        reporters = set()
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        neighbour_packets = [dict(pkt or {}) for pkt in self.neighbour_packets]
+
+        for node in mqtt_nodes.values():
+            topic = str((node or {}).get('mqtt_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if reporter:
+                reporters.add(reporter)
+
+        for pkt in neighbour_packets:
+            topic = str((pkt or {}).get('_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if reporter:
+                reporters.add(reporter)
+
+        return sorted(reporters)
+
+    def _collect_reporting_prefixes(self) -> Dict[str, str]:
+        """Collect latest known topic prefix label by reporting node id."""
+        prefix_by_reporter: Dict[str, str] = {}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        neighbour_packets = [dict(pkt or {}) for pkt in self.neighbour_packets]
+
+        def _prefix_label_from_topic(topic: str) -> str:
+            parsed = self._parse_mqtt_topic(topic)
+            prefix = str(parsed.get('prefix', '') or '').strip()
+            channel = str(parsed.get('channel', '') or '').strip()
+            if prefix:
+                return prefix
+            if channel:
+                return channel
+            parts = [p for p in str(topic or '').split('/') if p]
+            return '/'.join(parts[-3:]) if parts else ''
+
+        for node in mqtt_nodes.values():
+            topic = str((node or {}).get('mqtt_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if not reporter:
+                continue
+            label = _prefix_label_from_topic(topic)
+            if label:
+                prefix_by_reporter[reporter] = label
+
+        for pkt in neighbour_packets:
+            topic = str((pkt or {}).get('_topic') or '').strip()
+            if not topic:
+                continue
+            reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+            if not reporter:
+                continue
+            label = _prefix_label_from_topic(topic)
+            if label:
+                prefix_by_reporter[reporter] = label
+
+        return prefix_by_reporter
+
+    def _set_reporter_alias(self, reporter_id: str, alias_value: Any) -> None:
+        """Set/update nickname for a reporter node id and persist it."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return
+        alias = str(alias_value or '').strip()
+        old_alias = self.reporter_aliases.get(key, '')
+        if alias == old_alias:
+            return  # No change; skip save and re-render
+        if alias:
+            self.reporter_aliases[key] = alias
+        else:
+            self.reporter_aliases.pop(key, None)
+        self.data_persistence.save_reporter_aliases(self.reporter_aliases)
+        # Do NOT rebuild reporters UI here — that would destroy the input the user is typing in
+        self._update_nodes_display()
+
+    def _is_reporter_visible(self, reporter_id: str) -> bool:
+        """Return True when a reporter source is enabled for display."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return True
+        return bool(self.reporter_visibility.get(key, True))
+
+    def _is_node_visible_for_reporter(self, node: Dict[str, Any]) -> bool:
+        """Return True when a node's MQTT reporter source is enabled."""
+        topic = str((node or {}).get('mqtt_topic') or '').strip()
+        if not topic:
+            return True
+        reporter = self._parse_mqtt_topic(topic).get('reporter', '')
+        return self._is_reporter_visible(reporter)
+
+    def _set_reporter_visibility(self, reporter_id: str, visible: bool) -> None:
+        """Set whether a reporter source should be shown in node/map views."""
+        key = str(reporter_id or '').strip()
+        if not key:
+            return
+        self.reporter_visibility[key] = bool(visible)
+        self.data_persistence.save_reporter_visibility(self.reporter_visibility)
+        self._refresh_mqtt_reporters_ui(force=True)
+        self._update_nodes_display()
+        self._update_neighbour_views()
+
+    def _refresh_mqtt_reporters_ui(self, force: bool = False) -> None:
+        """Refresh MQTT settings section listing reporting nodes and nickname inputs."""
+        if self.mqtt_reporters_container is None:
+            return
+
+        reporters = self._collect_reporting_nodes()
+        reporter_prefixes = self._collect_reporting_prefixes()
+        if not force and reporters == self._known_reporting_nodes and reporter_prefixes == self._known_reporting_prefixes:
+            return
+        self._known_reporting_nodes = list(reporters)
+        self._known_reporting_prefixes = dict(reporter_prefixes)
+
+        self.mqtt_reporters_container.clear()
+        with self.mqtt_reporters_container:
+            if not reporters:
+                ui.label('No reporting nodes discovered yet').classes('text-caption text-gray-500')
+                return
+
+            with ui.row().classes('w-full items-center gap-2 pb-1 border-b border-gray-300/40'):
+                ui.label('ID').classes('text-caption font-semibold w-40')
+                ui.label('Nickname').classes('text-caption font-semibold flex-1')
+                ui.label('Show').classes('text-caption font-semibold w-16 text-right')
+
+            for reporter in reporters:
+                is_visible = self._is_reporter_visible(reporter)
+                with ui.row().classes('w-full items-center gap-2'):
+                    with ui.column().classes('w-40 gap-0'):
+                        ui.label(reporter).classes('text-caption font-mono')
+                        prefix_label = str(reporter_prefixes.get(reporter, '') or '').strip()
+                        if prefix_label:
+                            ui.label(prefix_label).classes('text-[11px] text-gray-500 -mt-1 break-all')
+                    # on_change gives ValueChangeEventArguments with a reliable .value
+                    ui.input(
+                        '',
+                        value=self.reporter_aliases.get(reporter, ''),
+                        placeholder='optional nickname',
+                        on_change=lambda e, rid=reporter: self._set_reporter_alias(rid, e.value)
+                    ).classes('flex-1')
+                    ui.switch(
+                        '',
+                        value=is_visible,
+                        on_change=lambda e, rid=reporter: self._set_reporter_visibility(rid, bool(e.value))
+                    ).props('dense').classes('w-16 justify-end')
+
+    @staticmethod
+    def _to_node_id(value: Any) -> str:
+        """Convert numeric or string node identifier to canonical !xxxxxxxx form when possible."""
+        if value is None:
+            return ''
+        if isinstance(value, str):
+            s = value.strip().lower()
+            if not s:
+                return ''
+            if s.startswith('!'):
+                return s
+            try:
+                return f"!{int(s):08x}"
+            except Exception:
+                return s
+        try:
+            return f"!{int(value):08x}"
+        except Exception:
+            return str(value)
+
+    @staticmethod
+    def _format_time_ago(timestamp: int) -> str:
+        """Return a compact relative time string for a unix timestamp."""
+        if timestamp <= 0:
+            return 'unknown'
+        delta = max(0, int(time.time()) - int(timestamp))
+        if delta < 60:
+            return f'{delta}s ago'
+        if delta < 3600:
+            return f'{delta // 60}m ago'
+        if delta < 86400:
+            hours = delta // 3600
+            minutes = (delta % 3600) // 60
+            return f'{hours}h {minutes}m ago' if minutes else f'{hours}h ago'
+        days = delta // 86400
+        hours = (delta % 86400) // 3600
+        return f'{days}d {hours}h ago' if hours else f'{days}d ago'
+
+    def _update_neighbour_views(self) -> None:
+        """Refresh Neighbour map tab sections from collected MQTT packets."""
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+        neighbour_packets = [dict(pkt or {}) for pkt in self.neighbour_packets]
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        print(f"DEBUG: _update_neighbour_views retrieved {len(neighbour_packets)} packets from mqtt_manager")
+        self._refresh_mqtt_reporters_ui()
+
+        if self.neighbour_log_container is None or self.neighbour_map_container is None or self.neighbour_unknown_container is None:
+            return
+
+        # ---- log section ----
+        self.neighbour_log_container.clear()
+        with self.neighbour_log_container:
+            total = len(neighbour_packets)
+            ui.label(f'Packets collected: {total}').classes('text-caption text-gray-500')
+            if total == 0:
+                ui.label('No neighbour packets yet').classes('text-gray-500')
+            else:
+                # Keep UI manageable while still collecting all in memory
+                recent_packets = neighbour_packets[-200:]
+                if total > len(recent_packets):
+                    ui.label(f'Showing latest {len(recent_packets)} packets').classes('text-caption text-gray-500')
+                for pkt in reversed(recent_packets):
+                    ts = pkt.get('timestamp', pkt.get('_received_at', ''))
+                    node_from = self._to_node_id(pkt.get('from'))
+                    topic = pkt.get('_topic', '')
+                    with ui.column().classes('w-full rounded border border-gray-300 p-2 bg-gray-50 dark:bg-gray-900'):
+                        ui.label(f'{ts}  {node_from}  {topic}').classes('text-caption font-mono')
+                        ui.label(json.dumps(pkt, separators=(',', ':'), sort_keys=True)).classes('text-caption font-mono break-all')
+
+        # ---- map section ----
+        self.neighbour_map_container.clear()
+        edges: Dict[tuple, Dict[str, Any]] = {}
+        reporter_nodes = set()
+        latest_packets_by_reporter: Dict[str, Dict[str, Any]] = {}
+        for pkt in neighbour_packets:
+            if (pkt.get('type') or '').lower() not in ('neighborinfo', 'neighbourinfo'):
+                continue
+            payload = pkt.get('payload') or {}
+            reporter = self._to_node_id(payload.get('node_id') or pkt.get('from'))
+            if not reporter:
+                continue
+            if not self._is_reporter_visible(reporter):
+                continue
+            reporter_nodes.add(reporter)
+            ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
+            current_latest = latest_packets_by_reporter.get(reporter)
+            current_latest_ts = int((current_latest or {}).get('timestamp') or (current_latest or {}).get('_received_at') or 0)
+            if current_latest is None or ts >= current_latest_ts:
+                latest_packets_by_reporter[reporter] = pkt
+
+        for reporter, pkt in latest_packets_by_reporter.items():
+            payload = pkt.get('payload') or {}
+            ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
+            for n in payload.get('neighbors') or []:
+                neighbour = self._to_node_id(n.get('node_id'))
+                if not neighbour:
+                    continue
+                key = (reporter, neighbour)
+                edges[key] = {
+                    'count': 1,
+                    'snr': n.get('snr'),
+                    'last_ts': ts,
+                }
+
+        # ---- unknown neighbour section ----
+        self.neighbour_unknown_container.clear()
+        three_hours_ago = int(time.time()) - (3 * 3600)
+        visible_nodes: Dict[str, Any] = dict(mesh_nodes)
+        for node_id, node in mqtt_nodes.items():
+            if node_id not in visible_nodes:
+                if not self._is_node_visible_for_reporter(node):
+                    continue
+                visible_nodes[node_id] = node
+
+        known_neighbour_nodes = set(edges_node for edge in edges for edges_node in edge) | set(latest_packets_by_reporter.keys())
+        unknown_nodes = []
+        for node_id, node in visible_nodes.items():
+            last_heard = int((node or {}).get('lastHeard') or 0)
+            if last_heard < three_hours_ago:
+                continue
+            if node_id in known_neighbour_nodes:
+                continue
+            user = node.get('user') or {}
+            name = user.get('longName') or user.get('shortName') or node_id
+            unknown_nodes.append((last_heard, node_id, name))
+
+        unknown_nodes.sort(reverse=True)
+        with self.neighbour_unknown_container:
+            ui.label(f'Nodes: {len(unknown_nodes)}').classes('text-caption text-gray-500')
+            if not unknown_nodes:
+                ui.label('None').classes('text-gray-500')
+            else:
+                for last_heard, node_id, name in unknown_nodes:
+                    ui.label(f'{name} ({node_id})').classes('text-caption')
+                    ui.label(f'last heard: {self._format_time_ago(last_heard)}').classes('text-caption text-gray-500 -mt-2 mb-1')
+
+        with self.neighbour_map_container:
+            node_ids = sorted({node_id for edge in edges for node_id in edge} | set(latest_packets_by_reporter.keys()))
+            ui.label(f'Links discovered: {len(edges)} | Nodes: {len(node_ids)}').classes('text-caption text-gray-500')
+            if not edges:
+                ui.label('No neighbour links yet').classes('text-gray-500')
+            else:
+                width = 960
+                height = 720
+                padding = 90
+
+                # ── Fruchterman-Reingold force-directed layout ───────────────
+                n = len(node_ids)
+                node_index = {nid: i for i, nid in enumerate(node_ids)}
+                adj_sets: list = [set() for _ in range(n)]
+                for (rn, nn) in edges:
+                    ri, ni = node_index.get(rn, -1), node_index.get(nn, -1)
+                    if ri >= 0 and ni >= 0:
+                        adj_sets[ri].add(ni)
+                        adj_sets[ni].add(ri)
+
+                # Deterministic circular seed
+                cx0, cy0 = width / 2.0, height / 2.0
+                r0 = min(width - 2 * padding, height - 2 * padding) * 0.38
+                pos_x = [cx0 + r0 * math.cos((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
+                pos_y = [cy0 + r0 * math.sin((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
+
+                k_fd = math.sqrt((width - 2 * padding) * (height - 2 * padding) / max(n, 1))
+                iters = 300
+                for it in range(iters):
+                    fx = [0.0] * n
+                    fy = [0.0] * n
+                    # Repulsion between every pair
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            dx = pos_x[i] - pos_x[j]
+                            dy = pos_y[i] - pos_y[j]
+                            dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                            rep = k_fd * k_fd / dist
+                            ux, uy = dx / dist, dy / dist
+                            fx[i] += ux * rep;  fy[i] += uy * rep
+                            fx[j] -= ux * rep;  fy[j] -= uy * rep
+                    # Attraction along edges
+                    for i in range(n):
+                        for j in adj_sets[i]:
+                            if j > i:
+                                dx = pos_x[j] - pos_x[i]
+                                dy = pos_y[j] - pos_y[i]
+                                dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                                att = dist * dist / k_fd
+                                ux, uy = dx / dist, dy / dist
+                                fx[i] += ux * att;  fy[i] += uy * att
+                                fx[j] -= ux * att;  fy[j] -= uy * att
+                    # Apply displacement with cooling
+                    temp = max(5.0, (width / 8.0) * (1.0 - it / iters))
+                    for i in range(n):
+                        mag = max((fx[i] * fx[i] + fy[i] * fy[i]) ** 0.5, 1e-9)
+                        disp = min(mag, temp)
+                        pos_x[i] = max(padding, min(width - padding, pos_x[i] + fx[i] / mag * disp))
+                        pos_y[i] = max(padding, min(height - padding, pos_y[i] + fy[i] / mag * disp))
+
+                node_positions: Dict[str, tuple] = {node_ids[i]: (pos_x[i], pos_y[i]) for i in range(n)}
+
+                def _escape(text: str) -> str:
+                    return (
+                        str(text)
+                        .replace('&', '&amp;')
+                        .replace('<', '&lt;')
+                        .replace('>', '&gt;')
+                        .replace('"', '&quot;')
+                    )
+
+                svg_parts = [
+                    f'<svg viewBox="0 0 {width} {height}" class="w-full" style="min-height: 720px; background: rgba(128,128,128,0.06); border-radius: 12px;">',
+                    '<defs>',
+                    '<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">',
+                    '<polygon points="0 0, 10 3.5, 0 7" fill="#64748b"></polygon>',
+                    '</marker>',
+                    '<marker id="arrowhead-rev" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">',
+                    '<polygon points="10 0, 0 3.5, 10 7" fill="#64748b"></polygon>',
+                    '</marker>',
+                    '</defs>',
+                ]
+
+                # Build bidirectional edge pairs to avoid duplicate lines
+                processed_edges = set()
+
+                for (reporter, neighbour), edge in edges.items():
+                    pair = tuple(sorted([reporter, neighbour]))
+                    if pair in processed_edges:
+                        continue
+                    processed_edges.add(pair)
+
+                    x1, y1 = node_positions[neighbour]
+                    x2, y2 = node_positions[reporter]
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    length = max((dx * dx + dy * dy) ** 0.5, 1)
+                    node_radius = 28
+                    start_x = x1 + (dx / length) * node_radius
+                    start_y = y1 + (dy / length) * node_radius
+                    end_x = x2 - (dx / length) * node_radius
+                    end_y = y2 - (dy / length) * node_radius
+
+                    snr_forward = edge['snr']
+                    snr_forward_txt = f'{snr_forward}dB' if snr_forward is not None else 'n/a'
+
+                    # Check for reverse direction
+                    reverse_key = (neighbour, reporter)
+                    has_reverse = reverse_key in edges
+                    snr_reverse = edges[reverse_key]['snr'] if has_reverse else None
+                    snr_reverse_txt = f'{snr_reverse}dB' if snr_reverse is not None else 'n/a'
+
+                    title_txt = _escape(f'{neighbour} → {reporter}: {snr_forward_txt}')
+                    if has_reverse:
+                        title_txt += _escape(f' | {reporter} → {neighbour}: {snr_reverse_txt}')
+
+                    # Draw single line with appropriate arrowheads
+                    if has_reverse:
+                        # Bidirectional: both arrowheads
+                        svg_parts.append(
+                            f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-start="url(#arrowhead-rev)" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                        )
+                    else:
+                        # Unidirectional: single arrowhead at the end
+                        svg_parts.append(
+                            f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                        )
+
+                    # Place forward SNR label at 1/3 point
+                    label_x_1 = start_x + (end_x - start_x) * 0.33
+                    label_y_1 = start_y + (end_y - start_y) * 0.33
+                    svg_parts.append(
+                        f'<text x="{label_x_1:.1f}" y="{label_y_1 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_forward_txt)}</text>'
+                    )
+
+                    # If bidirectional, place reverse SNR label at 2/3 point
+                    if has_reverse:
+                        label_x_2 = start_x + (end_x - start_x) * 0.67
+                        label_y_2 = start_y + (end_y - start_y) * 0.67
+                        svg_parts.append(
+                            f'<text x="{label_x_2:.1f}" y="{label_y_2 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_reverse_txt)}</text>'
+                        )
+
+                for node_id, (x, y) in node_positions.items():
+                    is_reporter = node_id in reporter_nodes
+                    fill, font_color = self.get_nodechip_colour(node_id)
+                    stroke = 'white' if is_reporter else '#94a3b8'
+                    stroke_width = 3 if is_reporter else 2
+
+                    nd = visible_nodes.get(node_id) or {}
+                    usr = nd.get('user') or {}
+                    short_name = (usr.get('shortName') or node_id[-4:]).upper()
+                    long_name = usr.get('longName') or ''
+
+                    inner_label = _escape(short_name[:5])
+                    name_label = _escape(long_name[:16]) if long_name else ''
+                    title_txt = _escape(f'{node_id} | {long_name or short_name} | reporter={is_reporter}')
+
+                    svg_parts.append(
+                        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="28" fill="{fill}" stroke="{stroke}" stroke-width="{stroke_width}"><title>{title_txt}</title></circle>'
+                    )
+                    if is_reporter:
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y - 3:.1f}" text-anchor="middle" fill="{font_color}" font-size="16">🧭</text>'
+                        )
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y + 16:.1f}" text-anchor="middle" fill="{font_color}" font-size="10">{inner_label}</text>'
+                        )
+                    else:
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" fill="{font_color}" font-size="12">{inner_label}</text>'
+                        )
+                    if name_label:
+                        svg_parts.append(
+                            f'<text x="{x:.1f}" y="{y + 44:.1f}" text-anchor="middle" fill="#94a3b8" font-size="10">{name_label}</text>'
+                        )
+
+                svg_parts.append('</svg>')
+                ui.html(''.join(svg_parts)).classes('w-full')
+
+                with ui.row().classes('w-full flex-wrap gap-x-6 gap-y-1 mt-2'):
+                    ui.label('🧭 = node has reported neighbour info').classes('text-caption text-gray-500')
+                    ui.label('Arrow direction = neighbour to reporter').classes('text-caption text-gray-500')
     
     def connect_tcp(self) -> None:
         """Connect via TCP."""
@@ -492,43 +1488,235 @@ class MeshViewerGUI:
         self.connection_status.text = ui_text.get('disconnected_status', 'Disconnected')
         self.connection_status.classes('text-gray')
         self._clear_nodes_display()
+
+    # ── MQTT ──────────────────────────────────────────────────────────────
+
+    def connect_mqtt(self) -> None:
+        """Connect to the MQTT broker."""
+        url = self.mqtt_host_input.value.strip()
+        if not url:
+            if self.mqtt_status:
+                self.mqtt_status.text = 'MQTT: Enter broker URL'
+            return
+        username = self.mqtt_user_input.value.strip()
+        password = self.mqtt_pass_input.value
+        topic = self.mqtt_topic_input.value.strip() or '#'
+
+        ok = self.mqtt_manager.connect(url, username, password, topic)
+        if ok:
+            self.mqtt_connected = True
+            if self.mqtt_status:
+                self.mqtt_status.text = f'MQTT: Connecting to {url} …'
+            # Poll for actual connection status
+            import asyncio
+
+            async def _wait_connected():
+                for _ in range(20):
+                    await asyncio.sleep(0.5)
+                    if self.mqtt_manager.is_connected():
+                        if self.mqtt_status:
+                            self.mqtt_status.text = f'MQTT: Connected to {url} [{topic}]'
+                        return
+                if not self.mqtt_manager.is_connected():
+                    if self.mqtt_status:
+                        self.mqtt_status.text = f'MQTT: Connection timeout'
+                    self.mqtt_connected = False
+
+            import asyncio
+            asyncio.ensure_future(_wait_connected())
+        else:
+            self.mqtt_connected = False
+            if self.mqtt_status:
+                self.mqtt_status.text = 'MQTT: Connection failed (paho-mqtt not installed?)'
+
+    def disconnect_mqtt(self) -> None:
+        """Disconnect from the MQTT broker."""
+        self.mqtt_manager.disconnect()
+        self.mqtt_connected = False
+        self.mqtt_nodes_data = {}
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+        if self.mqtt_status:
+            self.mqtt_status.text = 'MQTT: Disconnected'
+        self._update_nodes_display()
+        self._update_neighbour_views()
+
+    def _on_mqtt_update(self) -> None:
+        """Called by MqttConnectionManager when new data arrives (background thread)."""
+        self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+        self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+        # Schedule UI update on the main thread
+        try:
+            from nicegui import background_tasks
+            background_tasks.create(self._async_mqtt_refresh())
+        except Exception as e:
+            print(f'WARNING: failed to schedule MQTT UI refresh: {e}')
+            traceback.print_exc()
+
+    async def _async_mqtt_refresh(self) -> None:
+        """Async wrapper to update nodes display from MQTT data."""
+        try:
+            await self._run_mqtt_refresh_once()
+        except RuntimeError as e:
+            if 'dictionary changed size during iteration' not in str(e).lower():
+                raise
+            print(
+                'MESHMONITOR_DICT_RACE: concurrent dictionary update during MQTT refresh; '
+                f'retrying once with fresh snapshots (mqtt_nodes={len(self.mqtt_nodes_data)}, '
+                f'neighbour_packets={len(self.neighbour_packets)}).'
+            )
+            traceback.print_exc()
+            self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+            self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+            await self._run_mqtt_refresh_once()
+
+    async def _run_mqtt_refresh_once(self) -> None:
+        """Run one MQTT-driven UI refresh pass using current snapshots."""
+        import asyncio
+        # Persist MQTT updates even when no manual refresh occurs.
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        merged_for_persistence = dict(mesh_nodes)
+        for nid, mqtt_node in mqtt_nodes.items():
+            if nid not in merged_for_persistence:
+                merged_for_persistence[nid] = mqtt_node
+            else:
+                existing = merged_for_persistence[nid]
+                mqtt_last = int(mqtt_node.get('lastHeard', 0) or 0)
+                existing_last = int(existing.get('lastHeard', 0) or 0)
+                if mqtt_last > existing_last:
+                    merged_for_persistence[nid] = {**existing, **mqtt_node, 'lastHeard': mqtt_last}
+        if merged_for_persistence:
+            self.data_persistence.save_nodes_data(merged_for_persistence)
+        self.data_persistence.save_neighbour_packets(self.neighbour_packets)
+
+        # Yield between UI mutations to allow NiceGUI's response builder to complete
+        self._refresh_mqtt_reporters_ui()
+        await asyncio.sleep(0)
+        self._update_nodes_display()
+        await asyncio.sleep(0)
+        self._update_neighbour_views()
     
     def refresh_nodes(self) -> None:
         """Refresh the nodes display."""
-        if not self.connected or not self.mesh_interface:
-            return
-        
-        # Refresh nodes data and force last heard updates
-        self.mesh_interface.refresh_nodes_data()
-        self.mesh_interface.detect_last_heard_changes()
-        self.mesh_interface.force_last_heard_update()
-        
-        self.nodes_data = self.mesh_interface.get_all_nodes_data()
-        
-        # Save data to persistence layer
-        self.data_persistence.save_nodes_data(self.nodes_data)
-        
-        self._update_nodes_display()
-        # Update the node count display
-        if hasattr(self, 'node_count_label'):
-            self.node_count_label.update()
+        try:
+            if self.connected and self.mesh_interface:
+                # Refresh Meshtastic nodes data
+                self.mesh_interface.refresh_nodes_data()
+                self.mesh_interface.detect_last_heard_changes()
+                self.mesh_interface.force_last_heard_update()
+                self.nodes_data = self.mesh_interface.get_all_nodes_data()
+                # Save data to persistence layer
+                self.data_persistence.save_nodes_data(self.nodes_data)
+
+            # Always pull latest MQTT nodes
+            self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+            self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+            self._refresh_mqtt_reporters_ui()
+
+            # Persist merged data (Meshtastic + MQTT) so battery history captures both
+            mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+            mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+            merged_for_persistence = dict(mesh_nodes)
+            for nid, mqtt_node in mqtt_nodes.items():
+                if nid not in merged_for_persistence:
+                    merged_for_persistence[nid] = mqtt_node
+                else:
+                    existing = merged_for_persistence[nid]
+                    mqtt_last = int(mqtt_node.get('lastHeard', 0) or 0)
+                    existing_last = int(existing.get('lastHeard', 0) or 0)
+                    if mqtt_last > existing_last:
+                        merged_for_persistence[nid] = {**existing, **mqtt_node, 'lastHeard': mqtt_last}
+            if merged_for_persistence:
+                self.data_persistence.save_nodes_data(merged_for_persistence)
+            self.data_persistence.save_neighbour_packets(self.neighbour_packets)
+
+            self._update_nodes_display()
+            self._update_neighbour_views()
+            # Update the node count display
+            if hasattr(self, 'node_count_label'):
+                self.node_count_label.update()
+        except RuntimeError as e:
+            if 'dictionary changed size during iteration' not in str(e).lower():
+                raise
+            print(
+                'MESHMONITOR_DICT_RACE: concurrent dictionary update during refresh_nodes; '
+                'retrying once with fresh MQTT snapshots.'
+            )
+            traceback.print_exc()
+            self.mqtt_nodes_data = self.mqtt_manager.get_nodes_data()
+            self.neighbour_packets = self.mqtt_manager.get_neighbor_packets()
+            self._update_nodes_display()
+            self._update_neighbour_views()
     
     def _update_nodes_display(self) -> None:
-        """Update the nodes display with current data."""
-        self.nodes_container.clear()
-        ui_text = self.config.get_ui_text().get('nodes', {})
-        
-        if not self.nodes_data:
+        """Update the nodes display with current data (Meshtastic + MQTT merged)."""
+        # Use lock to prevent concurrent mutations of NiceGUI's elements dict
+        with self._ui_update_lock:
+            self.nodes_container.clear()
+            ui_text = self.config.get_ui_text().get('nodes', {})
+
+            visible_nodes = self._get_visible_nodes_for_display()
+
+            if not visible_nodes:
+                with self.nodes_container:
+                    ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
+                if hasattr(self, 'node_count_label'):
+                    self.node_count_label.update()
+                return
+
             with self.nodes_container:
-                ui.label(ui_text.get('no_nodes_found', 'No nodes found')).classes('text-gray-500')
-            return
-        
-        for node_id, node in self.nodes_data.items():
-            if not self.show_all_nodes and 'isFavorite' not in node.keys():
+                for node_id, node in visible_nodes:
+                    self._create_node_card(node_id, node)
+
+            if hasattr(self, 'node_count_label'):
+                self.node_count_label.update()
+
+    def _get_visible_nodes_for_display(self) -> list[tuple[str, Dict[str, Any]]]:
+        """Return node rows that should be visible in the nodes panel."""
+        # Build merged view: Meshtastic nodes first, then MQTT-only nodes
+        mesh_nodes = {nid: dict(node or {}) for nid, node in self.nodes_data.items()}
+        mqtt_nodes = {nid: dict(node or {}) for nid, node in self.mqtt_nodes_data.items()}
+        all_nodes: Dict[str, Any] = dict(mesh_nodes)
+        for node_id, node in mqtt_nodes.items():
+            if not self._is_node_visible_for_reporter(node):
                 continue
-            
-            with self.nodes_container:
-                self._create_node_card(node_id, node)
+            if node_id not in all_nodes:
+                all_nodes[node_id] = node
+            else:
+                # Node exists in both — use the source with the more recent lastHeard for badge
+                merged = all_nodes[node_id]
+                mqtt_last = node.get('lastHeard', 0) or 0
+                mesh_last = merged.get('lastHeard', 0) or 0
+                if mqtt_last > mesh_last:
+                    # MQTT heard this node more recently
+                    merged['_mqtt_source'] = True
+                    merged['lastHeard'] = mqtt_last
+                else:
+                    # Meshtastic is more recent — remove MQTT source badge
+                    merged.pop('_mqtt_source', None)
+                merged.pop('_from_persistence', None)
+
+        thirty_days_ago = int(time.time()) - 30 * 86400
+        visible_nodes: list[tuple[str, Dict[str, Any]]] = []
+
+        for node_id, node in all_nodes.items():
+            # Skip nodes not heard in the last 30 days
+            last_heard = int((node or {}).get('lastHeard') or 0)
+            if last_heard > 0 and last_heard < thirty_days_ago:
+                continue
+
+            # Skip MQTT nodes when the toggle is off
+            is_mqtt = node.get('_mqtt_source', False)
+            is_persisted = node.get('_from_persistence', False)
+            if (is_mqtt or (is_persisted and node_id not in self.nodes_data)) and not self.show_mqtt_nodes:
+                continue
+
+            if not self.show_all_nodes and 'isFavorite' not in node and not is_mqtt and not is_persisted:
+                continue
+
+            visible_nodes.append((node_id, node))
+
+        return visible_nodes
 
     def hex_to_rgb(self, hex_str: str) -> tuple:
         """Convert hex color string to RGB tuple."""
@@ -566,7 +1754,13 @@ class MeshViewerGUI:
         short_name = user.get('shortName') or f"!{node_id[-8:]}"
         long_name = user.get('longName') or node_id
         hw_model = user.get('hwModel') or ui_text.get('unknown_hw', 'Unknown')
-        
+        is_mqtt = node.get('_mqtt_source', False)  # live MQTT packet received
+        is_bridge = node.get('_is_bridge', False)
+        is_persisted_only = node.get('_from_persistence', False) and not is_mqtt
+        mqtt_topic = node.get('mqtt_topic', '')
+        # Compact topic format: reported by <reporter>: <prefix>-<channel>
+        topic_short = self._format_mqtt_topic_compact(mqtt_topic) if mqtt_topic else ''
+
         with ui.card().classes('w-full mb-1 py-1'):
             bg_color, font_color = self.get_nodechip_colour(node_id)
             label_classes = 'text-h6 text-white' if font_color == 'white' else 'text-h6'
@@ -574,10 +1768,19 @@ class MeshViewerGUI:
             with ui.expansion(value=False).classes('w-full') as exp:
                 with exp.add_slot('header'):  # Visible all the time
                     with ui.row().classes('w-full items-center justify-between'):
-                        with ui.row().classes('items-left'):
-                            with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
-                                ui.label(short_name).classes(label_classes).style(f'color: {font_color};')
-                            ui.label(long_name).classes('text-h6')
+                        with ui.column().classes('items-start gap-0'):
+                            with ui.row().classes('items-center gap-1'):
+                                with ui.element('div').style(f'background-color: {bg_color};').classes('inline-block px-2 py-1 rounded mr-2'):
+                                    ui.label(short_name).classes(label_classes).style(f'color: {font_color};')
+                                ui.label(long_name).classes('text-h6')
+                                if is_bridge:
+                                    ui.html('<span title="MQTT Bridge">🌉</span>').classes('text-lg')
+                                elif is_mqtt:
+                                    ui.html('<span title="MQTT node">📡</span>').classes('text-sm')
+                                elif is_persisted_only:
+                                    ui.html('<span title="Cached from last session">💾</span>').classes('text-sm opacity-50')
+                            if is_mqtt and topic_short:
+                                ui.label(topic_short).classes('text-caption font-mono text-blue-300 ml-2')
                         with ui.row().classes('items-right'):
                             self.render_last_heard(node)
                             if 'deviceMetrics' in node:
@@ -585,14 +1788,48 @@ class MeshViewerGUI:
 
 
                 # The expansion content is the detailed view
-                with ui.row().classes('w-full items-center justify-between'):
+                with ui.row().classes('w-full items-center justify-between flex-wrap gap-1'):
                     if 'deviceMetrics' in node:
-                        uptime_hours = self.mesh_interface.get_uptime(node, asString = False)
+                        metrics = node['deviceMetrics']
+                        uptime_s = metrics.get('uptimeSeconds', 0)
+                        uptime_hours = uptime_s / 3600 if uptime_s else 0
+                        if self.mesh_interface and not node.get('_mqtt_source') and not node.get('_from_persistence'):
+                            uptime_hours = self.mesh_interface.get_uptime(node, asString=False)
                         ui.label(f"up {uptime_hours:4.1f} hrs").classes('text-sm')
-                        channel_util = node.get('deviceMetrics', {}).get('channelUtilization', 0.0)
+                        channel_util = metrics.get('channelUtilization', 0.0)
                         ui.label(f"{ui_text.get('channel_util_label', 'Channel Util')}: {channel_util:.1f}%").classes('text-caption')
+                        
+                        # Display telemetry data if available
+                        co2 = metrics.get('co2')
+                        co2_temp = metrics.get('co2Temperature')
+                        co2_humidity = metrics.get('co2Humidity')
+                        if co2 is not None or co2_temp is not None or co2_humidity is not None:
+                            if co2 is not None:
+                                ui.label(f"CO₂: {co2:.0f} ppm").classes('text-caption')
+                            if co2_temp is not None:
+                                ui.label(f"Temp: {co2_temp:.1f}°C").classes('text-caption')
+                            if co2_humidity is not None:
+                                ui.label(f"Humidity: {co2_humidity:.1f}%").classes('text-caption')
+                    
                     ui.label(f"{ui_text.get('hw_label', 'HW')}: {hw_model}").classes('text-caption')
                     ui.label(f"{ui_text.get('user_id_label', 'User ID')}: {node_id}").classes('text-caption')
+                    if is_mqtt:
+                        badge = '🌉 MQTT Bridge' if is_bridge else '📡 MQTT'
+                        with ui.column().classes('w-full gap-0 mt-1'):
+                            ui.label(badge).classes('text-caption text-blue-400 font-bold')
+                            if mqtt_topic:
+                                ui.label(mqtt_topic).classes('text-caption font-mono text-gray-400')
+                            rssi = node.get('mqtt_rssi')
+                            snr = node.get('mqtt_snr')
+                            if rssi is not None or snr is not None:
+                                sig = ''
+                                if rssi is not None:
+                                    sig += f'RSSI: {rssi} dBm'
+                                if snr is not None:
+                                    sig += ('  ' if sig else '') + f'SNR: {snr} dB'
+                                ui.label(sig).classes('text-caption text-gray-500')
+                    elif is_persisted_only:
+                        ui.label('💾 Cached — awaiting live data').classes('text-caption text-gray-500 mt-1')
 
 
     def _clear_nodes_display(self) -> None:
@@ -606,7 +1843,13 @@ class MeshViewerGUI:
             self.node_count_label.update()
 
     def render_battery_string(self, node, node_id: str = ""):
-        battery_level, voltage, is_charging = self.mesh_interface.get_node_battery_status(node, asString = False)
+        if self.mesh_interface and not node.get('_mqtt_source') and not node.get('_from_persistence'):
+            battery_level, voltage, is_charging = self.mesh_interface.get_node_battery_status(node, asString=False)
+        else:
+            metrics = node.get('deviceMetrics', {})
+            battery_level = int(metrics.get('batteryLevel', 0))
+            voltage = float(metrics.get('voltage', 0.0))
+            is_charging = battery_level == 101
         if is_charging:
             bat_str = " Chg"
         else:
@@ -682,6 +1925,33 @@ class MeshViewerGUI:
             color = "#bbbbbb" if self.dark.value else "#444444"
         ui.html(
             f'<span class="text-sm" style="color:{color};">Last Heard:<br>{last_heard_str}</span>'
+        )
+
+    def render_telemetry_string(self, node):
+        """Render telemetry data (CO2, temperature, humidity) on node card."""
+        metrics = node.get('deviceMetrics', {})
+        co2 = metrics.get('co2')
+        co2_temp = metrics.get('co2Temperature')
+        co2_humidity = metrics.get('co2Humidity')
+        
+        # If no telemetry data, don't render anything
+        if co2 is None and co2_temp is None and co2_humidity is None:
+            return
+        
+        # Build telemetry text
+        telemetry_lines = []
+        if co2 is not None:
+            telemetry_lines.append(f"CO₂: {co2:.0f} ppm")
+        if co2_temp is not None:
+            telemetry_lines.append(f"Temp: {co2_temp:.1f}°C")
+        if co2_humidity is not None:
+            telemetry_lines.append(f"Humidity: {co2_humidity:.1f}%")
+        
+        telemetry_html = "<br>".join(telemetry_lines)
+        
+        text_color = "#bbbbbb" if self.dark.value else "#666666"
+        ui.html(
+            f'<span class="text-sm" style="color:{text_color};">Telemetry:<br>{telemetry_html}</span>'
         )
 
     
@@ -845,8 +2115,8 @@ class MeshViewerGUI:
                 df = df.drop_duplicates(subset=['timestamp'], keep='last')
                 print(f"DEBUG: Data shape after deduplication: {df.shape}")
                 
-                if not df.empty:
-                    print(f"DEBUG: Filtered data sample: {df[['timestamp', 'node_id', 'short_name', 'voltage', 'battery_level']].head()}")
+                # if not df.empty:
+                #     print(f"DEBUG: Filtered data sample: {df[['timestamp', 'node_id', 'short_name', 'voltage', 'battery_level']].head()}")
             
             # if df.empty:
             if False:
@@ -944,12 +2214,12 @@ class MeshViewerGUI:
             print(f"DEBUG: Battery range: {df['battery_level'].min():.0f}% to {df['battery_level'].max():.0f}%")
             print(f"DEBUG: Time range: {df['timestamp'].min()} to {df['timestamp'].max()}")
 
-            print("DEBUG: Voltage values:")
-            print(df['voltage'].tolist())
-            print("DEBUG: Battery level values:")
-            print(df['battery_level'].tolist())
-            print("DEBUG: Timestamps:")
-            print(df['timestamp'].tolist())
+            # print("DEBUG: Voltage values:")
+            # print(df['voltage'].tolist())
+            # print("DEBUG: Battery level values:")
+            # print(df['battery_level'].tolist())
+            # print("DEBUG: Timestamps:")
+            # print(df['timestamp'].tolist())
             print("DEBUG: Checking for duplicates:")
             print(f"DEBUG: Total rows: {len(df)}")
             print(f"DEBUG: Unique timestamps: {df['timestamp'].nunique()}")
@@ -1051,6 +2321,302 @@ class MeshViewerGUI:
         except Exception as e:
             print(f"Error updating battery chart: {e}")
             with self.battery_chart_container:
+                ui.label(f'Error loading chart: {str(e)}').classes('text-red-500 text-center')
+    
+    def update_telemetry_chart(self) -> None:
+        """Update the telemetry history chart (CO2, temperature, humidity)."""
+        try:
+            # Get data
+            days = self.telemetry_days_selector.value
+            df = self.data_persistence.get_telemetry_history(days)
+            print(f"DEBUG Telemetry: Days selected: {days}")
+            
+            # Update node selector with available nodes that have telemetry data
+            if df.empty:
+                available_nodes = {}
+            else:
+                available_nodes = {
+                    node_id: f"{df[df['node_id'] == node_id].iloc[0]['short_name']} ({node_id})"
+                    for node_id in df['node_id'].unique()
+                }
+            
+            self.telemetry_node_selector.options = available_nodes
+            
+            # Clear chart containers
+            self.telemetry_chart_container.clear()
+            self.telemetry_data_summary_container.clear()
+            self.telemetry_chart = None
+            print("DEBUG Telemetry: Containers cleared and chart reset")
+            
+            if df.empty:
+                # Show empty chart with full timespan
+                fig = go.Figure()
+                
+                # Calculate the full timespan for the selected period
+                from datetime import datetime, timedelta
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days)
+                
+                # Add empty traces
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='CO₂ (ppm)',
+                    line=dict(color='#FF6B6B', width=2),
+                    marker=dict(size=6, color='#FF6B6B', line=dict(width=1, color='white'))
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Temperature (°C)',
+                    yaxis='y2',
+                    line=dict(color='#4ECDC4', width=2),
+                    marker=dict(size=6, color='#4ECDC4', line=dict(width=1, color='white'))
+                ))
+                
+                fig.add_trace(go.Scatter(
+                    x=[],
+                    y=[],
+                    mode='markers+lines',
+                    name='Humidity (%)',
+                    yaxis='y3',
+                    line=dict(color='#95E1D3', width=2),
+                    marker=dict(size=6, color='#95E1D3', line=dict(width=1, color='white'))
+                ))
+                
+                fig.update_layout(
+                    title=f'Telemetry History - {self._get_time_label(days)} (No Data)',
+                    xaxis_title='Time',
+                    yaxis=dict(
+                        title='CO₂ (ppm)', 
+                        side='left',
+                        range=[400, 2000],
+                        tickformat='.0f'
+                    ),
+                    yaxis2=dict(
+                        title='Temperature (°C)', 
+                        side='right', 
+                        overlaying='y',
+                        range=[-10, 50],
+                        tickformat='.1f'
+                    ),
+                    yaxis3=dict(
+                        title='Humidity (%)', 
+                        side='right',
+                        overlaying='y',
+                        anchor='free',
+                        position=1.15,
+                        range=[0, 100],
+                        tickformat='.0f'
+                    ),
+                    hovermode='x unified',
+                    template='plotly_dark' if self.dark.value else 'plotly_white',
+                    height=500,
+                    xaxis=dict(
+                        range=[start_time, end_time],
+                        showgrid=True,
+                        gridwidth=1,
+                        gridcolor='rgba(128,128,128,0.2)'
+                    ),
+                    showlegend=True,
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.02,
+                        xanchor="right",
+                        x=1
+                    )
+                )
+                
+                with self.telemetry_chart_container:
+                    ui.plotly(fig).classes('w-full')
+                with self.telemetry_data_summary_container:
+                    ui.label('No telemetry data available for the selected time period').classes('text-gray-500 text-center')
+                return
+            
+            # Filter by selected node if specified
+            selected_node = self.telemetry_node_selector.value
+            print(f"DEBUG Telemetry: Selected node: {selected_node}")
+            print(f"DEBUG Telemetry: Data shape before filtering: {df.shape}")
+            if selected_node:
+                df = df[df['node_id'] == selected_node]
+                print(f"DEBUG Telemetry: Data shape after filtering: {df.shape}")
+                # Remove duplicates - keep the latest entry for each timestamp
+                df = df.drop_duplicates(subset=['timestamp'], keep='last')
+                print(f"DEBUG Telemetry: Data shape after deduplication: {df.shape}")
+            
+            if df.empty:
+                # Show empty chart for selected node
+                fig = go.Figure()
+                from datetime import datetime, timedelta
+                end_time = datetime.now()
+                start_time = end_time - timedelta(days=days)
+                
+                fig.add_trace(go.Scatter(x=[], y=[], mode='markers+lines', name='CO₂ (ppm)',
+                    line=dict(color='#FF6B6B', width=2), marker=dict(size=6, color='#FF6B6B')))
+                fig.add_trace(go.Scatter(x=[], y=[], mode='markers+lines', name='Temperature (°C)',
+                    yaxis='y2', line=dict(color='#4ECDC4', width=2), marker=dict(size=6, color='#4ECDC4')))
+                fig.add_trace(go.Scatter(x=[], y=[], mode='markers+lines', name='Humidity (%)',
+                    yaxis='y3', line=dict(color='#95E1D3', width=2), marker=dict(size=6, color='#95E1D3')))
+                
+                node_name = "Unknown Node"
+                if selected_node and not df.empty:
+                    node_name = df.iloc[0]['short_name']
+                
+                fig.update_layout(
+                    title=f'Telemetry History - {self._get_time_label(days)} - {node_name} (No Data)',
+                    xaxis_title='Time',
+                    yaxis=dict(title='CO₂ (ppm)', side='left', range=[400, 2000], tickformat='.0f'),
+                    yaxis2=dict(title='Temperature (°C)', side='right', overlaying='y', range=[-10, 50], tickformat='.1f'),
+                    yaxis3=dict(title='Humidity (%)', side='right', overlaying='y', anchor='free', position=1.15, range=[0, 100], tickformat='.0f'),
+                    hovermode='x unified',
+                    template='plotly_dark' if self.dark.value else 'plotly_white',
+                    height=500,
+                    xaxis=dict(range=[start_time, end_time], showgrid=True, gridwidth=1, gridcolor='rgba(128,128,128,0.2)'),
+                    showlegend=True,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                
+                with self.telemetry_chart_container:
+                    ui.plotly(fig).classes('w-full')
+                with self.telemetry_data_summary_container:
+                    ui.label(f'No data available for {node_name} in the selected time period').classes('text-gray-500 text-center')
+                return
+            
+            # Create telemetry chart
+            fig = go.Figure()
+            
+            # Calculate the full timespan for the selected period
+            from datetime import datetime, timedelta
+            end_time = datetime.now()
+            start_time = end_time - timedelta(days=days)
+            
+            print(f"DEBUG Telemetry: Plotting {len(df)} data points")
+            
+            # Add CO2 trace
+            co2_data = df['co2'].dropna()
+            if not co2_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=df[df['co2'].notna()]['timestamp'],
+                    y=co2_data.tolist(),
+                    mode='markers+lines',
+                    name='CO₂ (ppm)',
+                    line=dict(color='#FF6B6B', width=2),
+                    marker=dict(size=6, color='#FF6B6B', line=dict(width=1, color='#FF6B6B')),
+                    connectgaps=False
+                ))
+            
+            # Add temperature trace
+            temp_data = df['co2_temperature'].dropna()
+            if not temp_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=df[df['co2_temperature'].notna()]['timestamp'],
+                    y=temp_data.tolist(),
+                    mode='markers+lines',
+                    name='Temperature (°C)',
+                    yaxis='y2',
+                    line=dict(color='#4ECDC4', width=2),
+                    marker=dict(size=6, color='#4ECDC4', line=dict(width=1, color='#4ECDC4')),
+                    connectgaps=False
+                ))
+            
+            # Add humidity trace
+            humidity_data = df['co2_humidity'].dropna()
+            if not humidity_data.empty:
+                fig.add_trace(go.Scatter(
+                    x=df[df['co2_humidity'].notna()]['timestamp'],
+                    y=humidity_data.tolist(),
+                    mode='markers+lines',
+                    name='Humidity (%)',
+                    yaxis='y3',
+                    line=dict(color='#95E1D3', width=2),
+                    marker=dict(size=6, color='#95E1D3', line=dict(width=1, color='#95E1D3')),
+                    connectgaps=False
+                ))
+            
+            # Update layout with multiple y-axes
+            fig.update_layout(
+                title=f'Telemetry History - {self._get_time_label(days)}' + (f' - {df.iloc[0]["short_name"]}' if selected_node else ''),
+                xaxis_title='Time',
+                yaxis=dict(
+                    title='CO₂ (ppm)', 
+                    side='left',
+                    range=[400, 2000],
+                    tickformat='.0f'
+                ),
+                yaxis2=dict(
+                    title='Temperature (°C)', 
+                    side='right', 
+                    overlaying='y',
+                    range=[-10, 50],
+                    tickformat='.1f'
+                ),
+                yaxis3=dict(
+                    title='Humidity (%)', 
+                    side='right',
+                    overlaying='y',
+                    anchor='free',
+                    position=1.15,
+                    range=[0, 100],
+                    tickformat='.0f'
+                ),
+                hovermode='x unified',
+                template='plotly_dark' if self.dark.value else 'plotly_white',
+                height=500,
+                xaxis=dict(
+                    range=[start_time, end_time],
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor='rgba(128,128,128,0.2)'
+                ),
+                showlegend=True,
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom",
+                    y=1.02,
+                    xanchor="right",
+                    x=1
+                )
+            )
+            
+            # Display chart
+            with self.telemetry_chart_container:
+                self.telemetry_chart = ui.plotly(fig).classes('w-full')
+                print(f"DEBUG Telemetry: Chart created/updated with {len(df)} data points")
+            
+            # Display data summary
+            with self.telemetry_data_summary_container:
+                with ui.row().classes('w-full gap-4'):
+                    # CO2 stats
+                    if not co2_data.empty:
+                        with ui.card().classes('flex-1'):
+                            ui.label('CO₂ Stats').classes('text-h6')
+                            ui.label(f'Min: {co2_data.min():.0f} ppm').classes('text-sm')
+                            ui.label(f'Max: {co2_data.max():.0f} ppm').classes('text-sm')
+                            ui.label(f'Avg: {co2_data.mean():.0f} ppm').classes('text-sm')
+                    
+                    # Temperature stats
+                    if not temp_data.empty:
+                        with ui.card().classes('flex-1'):
+                            ui.label('Temperature Stats').classes('text-h6')
+                            ui.label(f'Min: {temp_data.min():.1f}°C').classes('text-sm')
+                            ui.label(f'Max: {temp_data.max():.1f}°C').classes('text-sm')
+                            ui.label(f'Avg: {temp_data.mean():.1f}°C').classes('text-sm')
+                    
+                    # Humidity stats
+                    if not humidity_data.empty:
+                        with ui.card().classes('flex-1'):
+                            ui.label('Humidity Stats').classes('text-h6')
+                            ui.label(f'Min: {humidity_data.min():.1f}%').classes('text-sm')
+                            ui.label(f'Max: {humidity_data.max():.1f}%').classes('text-sm')
+                            ui.label(f'Avg: {humidity_data.mean():.1f}%').classes('text-sm')
+                        
+        except Exception as e:
+            print(f"Error updating telemetry chart: {e}")
+            with self.telemetry_chart_container:
                 ui.label(f'Error loading chart: {str(e)}').classes('text-red-500 text-center')
     
     def run(self, **kwargs) -> None:

@@ -18,6 +18,29 @@ class MeshInterface:
         self.interface = interface
         self.last_heard_cache = {}  # Cache to track lastHeard changes
 
+    def _nodes_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Return a shallow snapshot of the current node map.
+
+        Meshtastic mutates the source dictionary from background handlers.
+        Retrying here prevents intermittent "dictionary changed size" crashes
+        during GUI refresh.
+        """
+        source = getattr(self.interface, 'nodes', {}) or {}
+        for attempt in range(3):
+            try:
+                return dict(source)
+            except RuntimeError as e:
+                if 'dictionary changed size during iteration' not in str(e).lower():
+                    raise
+                print(
+                    'MESHMONITOR_DICT_RACE: mesh interface nodes snapshot '
+                    f'failed on attempt {attempt + 1}/3; retrying.'
+                )
+                if attempt == 2:
+                    raise
+                time.sleep(0.01)
+        return {}
+
     def get_uptime(self, node: Dict[str, Any], asString: bool = True) -> Any:
         """
         Get uptime in hours for a node.
@@ -83,12 +106,13 @@ class MeshInterface:
             return lastHeard
 
     def get_single_node_dump(self):
-        node_ids = list(self.interface.nodes.keys())
+        nodes = self._nodes_snapshot()
+        node_ids = list(nodes.keys())
         if node_ids:
             node_id = node_ids[0]
         else:
             return
-        node = self.interface.nodes[node_id]
+        node = dict(nodes[node_id])
         node_keys = node.keys()
         print("Single node dump:")
         print(node_keys)
@@ -130,8 +154,7 @@ class MeshInterface:
         Args:
             whole_mesh: If True, show all nodes with device metrics
         """
-        for node_id in self.interface.nodes:
-            node = self.interface.nodes[node_id]
+        for node_id, node in self._nodes_snapshot().items():
             node_keys = node.keys()
             
             if whole_mesh and "deviceMetrics" in node_keys:
@@ -141,8 +164,7 @@ class MeshInterface:
 
     def find_non_favorites_string(self) -> None:
         """Print nodes that are not marked as favorites."""
-        for node_id in self.interface.nodes:
-            node = self.interface.nodes[node_id]
+        for node_id, node in self._nodes_snapshot().items():
             node_keys = node.keys()
             
             if "isFavorite" not in node_keys:
@@ -156,8 +178,7 @@ class MeshInterface:
             List of non-favorite node dictionaries
         """
         nodes = []
-        for node_id in self.interface.nodes:
-            node = self.interface.nodes[node_id]
+        for node_id, node in self._nodes_snapshot().items():
             node_keys = node.keys()
             
             if "isFavorite" not in node_keys:
@@ -173,8 +194,7 @@ class MeshInterface:
             List of favorite node dictionaries
         """
         nodes = []
-        for node_id in self.interface.nodes:
-            node = self.interface.nodes[node_id]
+        for node_id, node in self._nodes_snapshot().items():
             node_keys = node.keys()
             
             if "isFavorite" in node_keys:
@@ -189,7 +209,7 @@ class MeshInterface:
         Returns:
             Dictionary of node data keyed by node ID
         """
-        return self.interface.nodes
+        return self._nodes_snapshot()
 
     def get_node_data(self, node_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -201,7 +221,8 @@ class MeshInterface:
         Returns:
             Node data dictionary or None if not found
         """
-        return self.interface.nodes.get(node_id)
+        node = self._nodes_snapshot().get(node_id)
+        return dict(node) if node is not None else None
 
     def refresh_nodes_data(self) -> None:
         """
@@ -231,7 +252,7 @@ class MeshInterface:
                                 # These methods might need parameters
                                 if method_name == 'requestNodeInfo':
                                     # Try to request info for all known nodes
-                                    for node_id in list(self.interface.nodes.keys()):
+                                    for node_id in list(self._nodes_snapshot().keys()):
                                         try:
                                             method(node_id)
                                         except:
@@ -265,10 +286,11 @@ class MeshInterface:
         try:
             current_time = int(time.time())
             timestamp = time.strftime("%H:%M:%S", time.localtime())
+            nodes = self._nodes_snapshot()
             
             # Debug: Print current lastHeard values before any updates
             print(f"DEBUG [{timestamp}]: Checking lastHeard timestamps...")
-            for node_id, node in self.interface.nodes.items():
+            for node_id, node in nodes.items():
                 if 'lastHeard' in node:
                     last_heard_time = time.strftime("%H:%M:%S", time.localtime(node['lastHeard']))
                     node_short = node_id[-4:] if len(node_id) >= 4 else node_id
@@ -287,7 +309,7 @@ class MeshInterface:
             
             # Alternative: try to get node info for all known nodes
             elif hasattr(self.interface, 'getNodeInfo'):
-                for node_id in list(self.interface.nodes.keys()):
+                for node_id in list(nodes.keys()):
                     try:
                         node_info = self.interface.getNodeInfo(node_id)
                         if node_info and 'lastHeard' in node_info:
@@ -309,7 +331,7 @@ class MeshInterface:
             timestamp = time.strftime("%H:%M:%S", time.localtime())
             changes_detected = False
             
-            for node_id, node in self.interface.nodes.items():
+            for node_id, node in self._nodes_snapshot().items():
                 if 'lastHeard' in node:
                     current_last_heard = node['lastHeard']
                     cached_last_heard = self.last_heard_cache.get(node_id)

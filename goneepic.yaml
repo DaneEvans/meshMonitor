@@ -3,9 +3,9 @@
 
 # Application Settings
 app:
-  title: "MeshViewer"
+  title: "GoneEpic MeshViewer"
   subtitle: "Meshtastic Network Monitor"
-  page_title: "MeshViewer - Meshtastic Network Monitor"
+  page_title: "GoneEpic MeshViewer - Meshtastic Network Monitor"
   logo_path: "assets/M-PWRD.png"
   contactname: "Site by Dane Evans"
   contactsite: "https://daneevans.github.io/meshMonitor/"
@@ -81,7 +81,7 @@ connection:
 
 # MQTT Connection Settings
 mqtt:
-  default_host: ""           # e.g. mqtt://192.168.0.10 or just 192.168.0.10:1883
+  default_host: "mqtt.goneepic.com"           # e.g. mqtt://192.168.0.10 or just 192.168.0.10:1883
   default_username: ""
   default_password: ""
   default_topic: "#"          # Subscribe to all topics by default
