@@ -1082,37 +1082,39 @@ class MeshViewerGUI:
         self._known_reporting_nodes = list(reporters)
         self._known_reporting_prefixes = dict(reporter_prefixes)
 
-        self.mqtt_reporters_container.clear()
-        with self.mqtt_reporters_container:
-            if not reporters:
-                ui.label('No reporting nodes discovered yet').classes('text-caption text-gray-500')
-                return
+        # Use lock to prevent concurrent mutations of NiceGUI's elements dict
+        with self._ui_update_lock:
+            self.mqtt_reporters_container.clear()
+            with self.mqtt_reporters_container:
+                if not reporters:
+                    ui.label('No reporting nodes discovered yet').classes('text-caption text-gray-500')
+                    return
 
-            with ui.row().classes('w-full items-center gap-2 pb-1 border-b border-gray-300/40'):
-                ui.label('ID').classes('text-caption font-semibold w-40')
-                ui.label('Nickname').classes('text-caption font-semibold flex-1')
-                ui.label('Show').classes('text-caption font-semibold w-16 text-right')
+                with ui.row().classes('w-full items-center gap-2 pb-1 border-b border-gray-300/40'):
+                    ui.label('ID').classes('text-caption font-semibold w-40')
+                    ui.label('Nickname').classes('text-caption font-semibold flex-1')
+                    ui.label('Show').classes('text-caption font-semibold w-16 text-right')
 
-            for reporter in reporters:
-                is_visible = self._is_reporter_visible(reporter)
-                with ui.row().classes('w-full items-center gap-2'):
-                    with ui.column().classes('w-40 gap-0'):
-                        ui.label(reporter).classes('text-caption font-mono')
-                        prefix_label = str(reporter_prefixes.get(reporter, '') or '').strip()
-                        if prefix_label:
-                            ui.label(prefix_label).classes('text-[11px] text-gray-500 -mt-1 break-all')
-                    # on_change gives ValueChangeEventArguments with a reliable .value
-                    ui.input(
-                        '',
-                        value=self.reporter_aliases.get(reporter, ''),
-                        placeholder='optional nickname',
-                        on_change=lambda e, rid=reporter: self._set_reporter_alias(rid, e.value)
-                    ).classes('flex-1')
-                    ui.switch(
-                        '',
-                        value=is_visible,
-                        on_change=lambda e, rid=reporter: self._set_reporter_visibility(rid, bool(e.value))
-                    ).props('dense').classes('w-16 justify-end')
+                for reporter in reporters:
+                    is_visible = self._is_reporter_visible(reporter)
+                    with ui.row().classes('w-full items-center gap-2'):
+                        with ui.column().classes('w-40 gap-0'):
+                            ui.label(reporter).classes('text-caption font-mono')
+                            prefix_label = str(reporter_prefixes.get(reporter, '') or '').strip()
+                            if prefix_label:
+                                ui.label(prefix_label).classes('text-[11px] text-gray-500 -mt-1 break-all')
+                        # on_change gives ValueChangeEventArguments with a reliable .value
+                        ui.input(
+                            '',
+                            value=self.reporter_aliases.get(reporter, ''),
+                            placeholder='optional nickname',
+                            on_change=lambda e, rid=reporter: self._set_reporter_alias(rid, e.value)
+                        ).classes('flex-1')
+                        ui.switch(
+                            '',
+                            value=is_visible,
+                            on_change=lambda e, rid=reporter: self._set_reporter_visibility(rid, bool(e.value))
+                        ).props('dense').classes('w-16 justify-end')
 
     @staticmethod
     def _to_node_id(value: Any) -> str:
@@ -1164,276 +1166,278 @@ class MeshViewerGUI:
         if self.neighbour_log_container is None or self.neighbour_map_container is None or self.neighbour_unknown_container is None:
             return
 
-        # ---- log section ----
-        self.neighbour_log_container.clear()
-        with self.neighbour_log_container:
-            total = len(neighbour_packets)
-            ui.label(f'Packets collected: {total}').classes('text-caption text-gray-500')
-            if total == 0:
-                ui.label('No neighbour packets yet').classes('text-gray-500')
-            else:
-                # Keep UI manageable while still collecting all in memory
-                recent_packets = neighbour_packets[-200:]
-                if total > len(recent_packets):
-                    ui.label(f'Showing latest {len(recent_packets)} packets').classes('text-caption text-gray-500')
-                for pkt in reversed(recent_packets):
-                    ts = pkt.get('timestamp', pkt.get('_received_at', ''))
-                    node_from = self._to_node_id(pkt.get('from'))
-                    topic = pkt.get('_topic', '')
-                    with ui.column().classes('w-full rounded border border-gray-300 p-2 bg-gray-50 dark:bg-gray-900'):
-                        ui.label(f'{ts}  {node_from}  {topic}').classes('text-caption font-mono')
-                        ui.label(json.dumps(pkt, separators=(',', ':'), sort_keys=True)).classes('text-caption font-mono break-all')
+        # Use lock to prevent concurrent mutations of NiceGUI's elements dict
+        with self._ui_update_lock:
+            # ---- log section ----
+            self.neighbour_log_container.clear()
+            with self.neighbour_log_container:
+                total = len(neighbour_packets)
+                ui.label(f'Packets collected: {total}').classes('text-caption text-gray-500')
+                if total == 0:
+                    ui.label('No neighbour packets yet').classes('text-gray-500')
+                else:
+                    # Keep UI manageable while still collecting all in memory
+                    recent_packets = neighbour_packets[-200:]
+                    if total > len(recent_packets):
+                        ui.label(f'Showing latest {len(recent_packets)} packets').classes('text-caption text-gray-500')
+                    for pkt in reversed(recent_packets):
+                        ts = pkt.get('timestamp', pkt.get('_received_at', ''))
+                        node_from = self._to_node_id(pkt.get('from'))
+                        topic = pkt.get('_topic', '')
+                        with ui.column().classes('w-full rounded border border-gray-300 p-2 bg-gray-50 dark:bg-gray-900'):
+                            ui.label(f'{ts}  {node_from}  {topic}').classes('text-caption font-mono')
+                            ui.label(json.dumps(pkt, separators=(',', ':'), sort_keys=True)).classes('text-caption font-mono break-all')
 
-        # ---- map section ----
-        self.neighbour_map_container.clear()
-        edges: Dict[tuple, Dict[str, Any]] = {}
-        reporter_nodes = set()
-        latest_packets_by_reporter: Dict[str, Dict[str, Any]] = {}
-        for pkt in neighbour_packets:
-            if (pkt.get('type') or '').lower() not in ('neighborinfo', 'neighbourinfo'):
-                continue
-            payload = pkt.get('payload') or {}
-            reporter = self._to_node_id(payload.get('node_id') or pkt.get('from'))
-            if not reporter:
-                continue
-            if not self._is_reporter_visible(reporter):
-                continue
-            reporter_nodes.add(reporter)
-            ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
-            current_latest = latest_packets_by_reporter.get(reporter)
-            current_latest_ts = int((current_latest or {}).get('timestamp') or (current_latest or {}).get('_received_at') or 0)
-            if current_latest is None or ts >= current_latest_ts:
-                latest_packets_by_reporter[reporter] = pkt
-
-        for reporter, pkt in latest_packets_by_reporter.items():
-            payload = pkt.get('payload') or {}
-            ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
-            for n in payload.get('neighbors') or []:
-                neighbour = self._to_node_id(n.get('node_id'))
-                if not neighbour:
+            # ---- map section ----
+            self.neighbour_map_container.clear()
+            edges: Dict[tuple, Dict[str, Any]] = {}
+            reporter_nodes = set()
+            latest_packets_by_reporter: Dict[str, Dict[str, Any]] = {}
+            for pkt in neighbour_packets:
+                if (pkt.get('type') or '').lower() not in ('neighborinfo', 'neighbourinfo'):
                     continue
-                key = (reporter, neighbour)
-                edges[key] = {
-                    'count': 1,
-                    'snr': n.get('snr'),
-                    'last_ts': ts,
-                }
-
-        # ---- unknown neighbour section ----
-        self.neighbour_unknown_container.clear()
-        three_hours_ago = int(time.time()) - (3 * 3600)
-        visible_nodes: Dict[str, Any] = dict(mesh_nodes)
-        for node_id, node in mqtt_nodes.items():
-            if node_id not in visible_nodes:
-                if not self._is_node_visible_for_reporter(node):
+                payload = pkt.get('payload') or {}
+                reporter = self._to_node_id(payload.get('node_id') or pkt.get('from'))
+                if not reporter:
                     continue
-                visible_nodes[node_id] = node
+                if not self._is_reporter_visible(reporter):
+                    continue
+                reporter_nodes.add(reporter)
+                ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
+                current_latest = latest_packets_by_reporter.get(reporter)
+                current_latest_ts = int((current_latest or {}).get('timestamp') or (current_latest or {}).get('_received_at') or 0)
+                if current_latest is None or ts >= current_latest_ts:
+                    latest_packets_by_reporter[reporter] = pkt
 
-        known_neighbour_nodes = set(edges_node for edge in edges for edges_node in edge) | set(latest_packets_by_reporter.keys())
-        unknown_nodes = []
-        for node_id, node in visible_nodes.items():
-            last_heard = int((node or {}).get('lastHeard') or 0)
-            if last_heard < three_hours_ago:
-                continue
-            if node_id in known_neighbour_nodes:
-                continue
-            user = node.get('user') or {}
-            name = user.get('longName') or user.get('shortName') or node_id
-            unknown_nodes.append((last_heard, node_id, name))
-
-        unknown_nodes.sort(reverse=True)
-        with self.neighbour_unknown_container:
-            ui.label(f'Nodes: {len(unknown_nodes)}').classes('text-caption text-gray-500')
-            if not unknown_nodes:
-                ui.label('None').classes('text-gray-500')
-            else:
-                for last_heard, node_id, name in unknown_nodes:
-                    ui.label(f'{name} ({node_id})').classes('text-caption')
-                    ui.label(f'last heard: {self._format_time_ago(last_heard)}').classes('text-caption text-gray-500 -mt-2 mb-1')
-
-        with self.neighbour_map_container:
-            node_ids = sorted({node_id for edge in edges for node_id in edge} | set(latest_packets_by_reporter.keys()))
-            ui.label(f'Links discovered: {len(edges)} | Nodes: {len(node_ids)}').classes('text-caption text-gray-500')
-            if not edges:
-                ui.label('No neighbour links yet').classes('text-gray-500')
-            else:
-                width = 960
-                height = 720
-                padding = 90
-
-                # ── Fruchterman-Reingold force-directed layout ───────────────
-                n = len(node_ids)
-                node_index = {nid: i for i, nid in enumerate(node_ids)}
-                adj_sets: list = [set() for _ in range(n)]
-                for (rn, nn) in edges:
-                    ri, ni = node_index.get(rn, -1), node_index.get(nn, -1)
-                    if ri >= 0 and ni >= 0:
-                        adj_sets[ri].add(ni)
-                        adj_sets[ni].add(ri)
-
-                # Deterministic circular seed
-                cx0, cy0 = width / 2.0, height / 2.0
-                r0 = min(width - 2 * padding, height - 2 * padding) * 0.38
-                pos_x = [cx0 + r0 * math.cos((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
-                pos_y = [cy0 + r0 * math.sin((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
-
-                k_fd = math.sqrt((width - 2 * padding) * (height - 2 * padding) / max(n, 1))
-                iters = 300
-                for it in range(iters):
-                    fx = [0.0] * n
-                    fy = [0.0] * n
-                    # Repulsion between every pair
-                    for i in range(n):
-                        for j in range(i + 1, n):
-                            dx = pos_x[i] - pos_x[j]
-                            dy = pos_y[i] - pos_y[j]
-                            dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
-                            rep = k_fd * k_fd / dist
-                            ux, uy = dx / dist, dy / dist
-                            fx[i] += ux * rep;  fy[i] += uy * rep
-                            fx[j] -= ux * rep;  fy[j] -= uy * rep
-                    # Attraction along edges
-                    for i in range(n):
-                        for j in adj_sets[i]:
-                            if j > i:
-                                dx = pos_x[j] - pos_x[i]
-                                dy = pos_y[j] - pos_y[i]
-                                dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
-                                att = dist * dist / k_fd
-                                ux, uy = dx / dist, dy / dist
-                                fx[i] += ux * att;  fy[i] += uy * att
-                                fx[j] -= ux * att;  fy[j] -= uy * att
-                    # Apply displacement with cooling
-                    temp = max(5.0, (width / 8.0) * (1.0 - it / iters))
-                    for i in range(n):
-                        mag = max((fx[i] * fx[i] + fy[i] * fy[i]) ** 0.5, 1e-9)
-                        disp = min(mag, temp)
-                        pos_x[i] = max(padding, min(width - padding, pos_x[i] + fx[i] / mag * disp))
-                        pos_y[i] = max(padding, min(height - padding, pos_y[i] + fy[i] / mag * disp))
-
-                node_positions: Dict[str, tuple] = {node_ids[i]: (pos_x[i], pos_y[i]) for i in range(n)}
-
-                def _escape(text: str) -> str:
-                    return (
-                        str(text)
-                        .replace('&', '&amp;')
-                        .replace('<', '&lt;')
-                        .replace('>', '&gt;')
-                        .replace('"', '&quot;')
-                    )
-
-                svg_parts = [
-                    f'<svg viewBox="0 0 {width} {height}" class="w-full" style="min-height: 720px; background: rgba(128,128,128,0.06); border-radius: 12px;">',
-                    '<defs>',
-                    '<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">',
-                    '<polygon points="0 0, 10 3.5, 0 7" fill="#64748b"></polygon>',
-                    '</marker>',
-                    '<marker id="arrowhead-rev" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">',
-                    '<polygon points="10 0, 0 3.5, 10 7" fill="#64748b"></polygon>',
-                    '</marker>',
-                    '</defs>',
-                ]
-
-                # Build bidirectional edge pairs to avoid duplicate lines
-                processed_edges = set()
-
-                for (reporter, neighbour), edge in edges.items():
-                    pair = tuple(sorted([reporter, neighbour]))
-                    if pair in processed_edges:
+            for reporter, pkt in latest_packets_by_reporter.items():
+                payload = pkt.get('payload') or {}
+                ts = int(pkt.get('timestamp') or pkt.get('_received_at') or 0)
+                for n in payload.get('neighbors') or []:
+                    neighbour = self._to_node_id(n.get('node_id'))
+                    if not neighbour:
                         continue
-                    processed_edges.add(pair)
+                    key = (reporter, neighbour)
+                    edges[key] = {
+                        'count': 1,
+                        'snr': n.get('snr'),
+                        'last_ts': ts,
+                    }
 
-                    x1, y1 = node_positions[neighbour]
-                    x2, y2 = node_positions[reporter]
-                    dx = x2 - x1
-                    dy = y2 - y1
-                    length = max((dx * dx + dy * dy) ** 0.5, 1)
-                    node_radius = 28
-                    start_x = x1 + (dx / length) * node_radius
-                    start_y = y1 + (dy / length) * node_radius
-                    end_x = x2 - (dx / length) * node_radius
-                    end_y = y2 - (dy / length) * node_radius
+            # ---- unknown neighbour section ----
+            self.neighbour_unknown_container.clear()
+            three_hours_ago = int(time.time()) - (3 * 3600)
+            visible_nodes: Dict[str, Any] = dict(mesh_nodes)
+            for node_id, node in mqtt_nodes.items():
+                if node_id not in visible_nodes:
+                    if not self._is_node_visible_for_reporter(node):
+                        continue
+                    visible_nodes[node_id] = node
 
-                    snr_forward = edge['snr']
-                    snr_forward_txt = f'{snr_forward}dB' if snr_forward is not None else 'n/a'
+            known_neighbour_nodes = set(edges_node for edge in edges for edges_node in edge) | set(latest_packets_by_reporter.keys())
+            unknown_nodes = []
+            for node_id, node in visible_nodes.items():
+                last_heard = int((node or {}).get('lastHeard') or 0)
+                if last_heard < three_hours_ago:
+                    continue
+                if node_id in known_neighbour_nodes:
+                    continue
+                user = node.get('user') or {}
+                name = user.get('longName') or user.get('shortName') or node_id
+                unknown_nodes.append((last_heard, node_id, name))
 
-                    # Check for reverse direction
-                    reverse_key = (neighbour, reporter)
-                    has_reverse = reverse_key in edges
-                    snr_reverse = edges[reverse_key]['snr'] if has_reverse else None
-                    snr_reverse_txt = f'{snr_reverse}dB' if snr_reverse is not None else 'n/a'
+            unknown_nodes.sort(reverse=True)
+            with self.neighbour_unknown_container:
+                ui.label(f'Nodes: {len(unknown_nodes)}').classes('text-caption text-gray-500')
+                if not unknown_nodes:
+                    ui.label('None').classes('text-gray-500')
+                else:
+                    for last_heard, node_id, name in unknown_nodes:
+                        ui.label(f'{name} ({node_id})').classes('text-caption')
+                        ui.label(f'last heard: {self._format_time_ago(last_heard)}').classes('text-caption text-gray-500 -mt-2 mb-1')
 
-                    title_txt = _escape(f'{neighbour} → {reporter}: {snr_forward_txt}')
-                    if has_reverse:
-                        title_txt += _escape(f' | {reporter} → {neighbour}: {snr_reverse_txt}')
+            with self.neighbour_map_container:
+                node_ids = sorted({node_id for edge in edges for node_id in edge} | set(latest_packets_by_reporter.keys()))
+                ui.label(f'Links discovered: {len(edges)} | Nodes: {len(node_ids)}').classes('text-caption text-gray-500')
+                if not edges:
+                    ui.label('No neighbour links yet').classes('text-gray-500')
+                else:
+                    width = 960
+                    height = 720
+                    padding = 90
 
-                    # Draw single line with appropriate arrowheads
-                    if has_reverse:
-                        # Bidirectional: both arrowheads
-                        svg_parts.append(
-                            f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-start="url(#arrowhead-rev)" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                    # ── Fruchterman-Reingold force-directed layout ───────────────
+                    n = len(node_ids)
+                    node_index = {nid: i for i, nid in enumerate(node_ids)}
+                    adj_sets: list = [set() for _ in range(n)]
+                    for (rn, nn) in edges:
+                        ri, ni = node_index.get(rn, -1), node_index.get(nn, -1)
+                        if ri >= 0 and ni >= 0:
+                            adj_sets[ri].add(ni)
+                            adj_sets[ni].add(ri)
+
+                    # Deterministic circular seed
+                    cx0, cy0 = width / 2.0, height / 2.0
+                    r0 = min(width - 2 * padding, height - 2 * padding) * 0.38
+                    pos_x = [cx0 + r0 * math.cos((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
+                    pos_y = [cy0 + r0 * math.sin((2 * math.pi * i / max(n, 1)) - math.pi / 2) for i in range(n)]
+
+                    k_fd = math.sqrt((width - 2 * padding) * (height - 2 * padding) / max(n, 1))
+                    iters = 300
+                    for it in range(iters):
+                        fx = [0.0] * n
+                        fy = [0.0] * n
+                        # Repulsion between every pair
+                        for i in range(n):
+                            for j in range(i + 1, n):
+                                dx = pos_x[i] - pos_x[j]
+                                dy = pos_y[i] - pos_y[j]
+                                dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                                rep = k_fd * k_fd / dist
+                                ux, uy = dx / dist, dy / dist
+                                fx[i] += ux * rep;  fy[i] += uy * rep
+                                fx[j] -= ux * rep;  fy[j] -= uy * rep
+                        # Attraction along edges
+                        for i in range(n):
+                            for j in adj_sets[i]:
+                                if j > i:
+                                    dx = pos_x[j] - pos_x[i]
+                                    dy = pos_y[j] - pos_y[i]
+                                    dist = max((dx * dx + dy * dy) ** 0.5, 1.0)
+                                    att = dist * dist / k_fd
+                                    ux, uy = dx / dist, dy / dist
+                                    fx[i] += ux * att;  fy[i] += uy * att
+                                    fx[j] -= ux * att;  fy[j] -= uy * att
+                        # Apply displacement with cooling
+                        temp = max(5.0, (width / 8.0) * (1.0 - it / iters))
+                        for i in range(n):
+                            mag = max((fx[i] * fx[i] + fy[i] * fy[i]) ** 0.5, 1e-9)
+                            disp = min(mag, temp)
+                            pos_x[i] = max(padding, min(width - padding, pos_x[i] + fx[i] / mag * disp))
+                            pos_y[i] = max(padding, min(height - padding, pos_y[i] + fy[i] / mag * disp))
+
+                    node_positions: Dict[str, tuple] = {node_ids[i]: (pos_x[i], pos_y[i]) for i in range(n)}
+
+                    def _escape(text: str) -> str:
+                        return (
+                            str(text)
+                            .replace('&', '&amp;')
+                            .replace('<', '&lt;')
+                            .replace('>', '&gt;')
+                            .replace('"', '&quot;')
                         )
-                    else:
-                        # Unidirectional: single arrowhead at the end
+
+                    svg_parts = [
+                        f'<svg viewBox="0 0 {width} {height}" class="w-full" style="min-height: 720px; background: rgba(128,128,128,0.06); border-radius: 12px;">',
+                        '<defs>',
+                        '<marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">',
+                        '<polygon points="0 0, 10 3.5, 0 7" fill="#64748b"></polygon>',
+                        '</marker>',
+                        '<marker id="arrowhead-rev" markerWidth="10" markerHeight="7" refX="1" refY="3.5" orient="auto">',
+                        '<polygon points="10 0, 0 3.5, 10 7" fill="#64748b"></polygon>',
+                        '</marker>',
+                        '</defs>',
+                    ]
+
+                    # Build bidirectional edge pairs to avoid duplicate lines
+                    processed_edges = set()
+
+                    for (reporter, neighbour), edge in edges.items():
+                        pair = tuple(sorted([reporter, neighbour]))
+                        if pair in processed_edges:
+                            continue
+                        processed_edges.add(pair)
+
+                        x1, y1 = node_positions[neighbour]
+                        x2, y2 = node_positions[reporter]
+                        dx = x2 - x1
+                        dy = y2 - y1
+                        length = max((dx * dx + dy * dy) ** 0.5, 1)
+                        node_radius = 28
+                        start_x = x1 + (dx / length) * node_radius
+                        start_y = y1 + (dy / length) * node_radius
+                        end_x = x2 - (dx / length) * node_radius
+                        end_y = y2 - (dy / length) * node_radius
+
+                        snr_forward = edge['snr']
+                        snr_forward_txt = f'{snr_forward}dB' if snr_forward is not None else 'n/a'
+
+                        # Check for reverse direction
+                        reverse_key = (neighbour, reporter)
+                        has_reverse = reverse_key in edges
+                        snr_reverse = edges[reverse_key]['snr'] if has_reverse else None
+                        snr_reverse_txt = f'{snr_reverse}dB' if snr_reverse is not None else 'n/a'
+
+                        title_txt = _escape(f'{neighbour} → {reporter}: {snr_forward_txt}')
+                        if has_reverse:
+                            title_txt += _escape(f' | {reporter} → {neighbour}: {snr_reverse_txt}')
+
+                        # Draw single line with appropriate arrowheads
+                        if has_reverse:
+                            # Bidirectional: both arrowheads
+                            svg_parts.append(
+                                f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-start="url(#arrowhead-rev)" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                            )
+                        else:
+                            # Unidirectional: single arrowhead at the end
+                            svg_parts.append(
+                                f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                            )
+
+                        # Place forward SNR label at 1/3 point
+                        label_x_1 = start_x + (end_x - start_x) * 0.33
+                        label_y_1 = start_y + (end_y - start_y) * 0.33
                         svg_parts.append(
-                            f'<line x1="{start_x:.1f}" y1="{start_y:.1f}" x2="{end_x:.1f}" y2="{end_y:.1f}" stroke="#64748b" stroke-width="2" marker-end="url(#arrowhead)"><title>{title_txt}</title></line>'
+                            f'<text x="{label_x_1:.1f}" y="{label_y_1 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_forward_txt)}</text>'
                         )
 
-                    # Place forward SNR label at 1/3 point
-                    label_x_1 = start_x + (end_x - start_x) * 0.33
-                    label_y_1 = start_y + (end_y - start_y) * 0.33
-                    svg_parts.append(
-                        f'<text x="{label_x_1:.1f}" y="{label_y_1 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_forward_txt)}</text>'
-                    )
+                        # If bidirectional, place reverse SNR label at 2/3 point
+                        if has_reverse:
+                            label_x_2 = start_x + (end_x - start_x) * 0.67
+                            label_y_2 = start_y + (end_y - start_y) * 0.67
+                            svg_parts.append(
+                                f'<text x="{label_x_2:.1f}" y="{label_y_2 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_reverse_txt)}</text>'
+                            )
 
-                    # If bidirectional, place reverse SNR label at 2/3 point
-                    if has_reverse:
-                        label_x_2 = start_x + (end_x - start_x) * 0.67
-                        label_y_2 = start_y + (end_y - start_y) * 0.67
+                    for node_id, (x, y) in node_positions.items():
+                        is_reporter = node_id in reporter_nodes
+                        fill, font_color = self.get_nodechip_colour(node_id)
+                        stroke = 'white' if is_reporter else '#94a3b8'
+                        stroke_width = 3 if is_reporter else 2
+
+                        nd = visible_nodes.get(node_id) or {}
+                        usr = nd.get('user') or {}
+                        short_name = (usr.get('shortName') or node_id[-4:]).upper()
+                        long_name = usr.get('longName') or ''
+
+                        inner_label = _escape(short_name[:5])
+                        name_label = _escape(long_name[:16]) if long_name else ''
+                        title_txt = _escape(f'{node_id} | {long_name or short_name} | reporter={is_reporter}')
+
                         svg_parts.append(
-                            f'<text x="{label_x_2:.1f}" y="{label_y_2 - 5:.1f}" text-anchor="middle" fill="#94a3b8" font-size="11">{_escape(snr_reverse_txt)}</text>'
+                            f'<circle cx="{x:.1f}" cy="{y:.1f}" r="28" fill="{fill}" stroke="{stroke}" stroke-width="{stroke_width}"><title>{title_txt}</title></circle>'
                         )
+                        if is_reporter:
+                            svg_parts.append(
+                                f'<text x="{x:.1f}" y="{y - 3:.1f}" text-anchor="middle" fill="{font_color}" font-size="16">🧭</text>'
+                            )
+                            svg_parts.append(
+                                f'<text x="{x:.1f}" y="{y + 16:.1f}" text-anchor="middle" fill="{font_color}" font-size="10">{inner_label}</text>'
+                            )
+                        else:
+                            svg_parts.append(
+                                f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" fill="{font_color}" font-size="12">{inner_label}</text>'
+                            )
+                        if name_label:
+                            svg_parts.append(
+                                f'<text x="{x:.1f}" y="{y + 44:.1f}" text-anchor="middle" fill="#94a3b8" font-size="10">{name_label}</text>'
+                            )
 
-                for node_id, (x, y) in node_positions.items():
-                    is_reporter = node_id in reporter_nodes
-                    fill, font_color = self.get_nodechip_colour(node_id)
-                    stroke = 'white' if is_reporter else '#94a3b8'
-                    stroke_width = 3 if is_reporter else 2
+                    svg_parts.append('</svg>')
+                    ui.html(''.join(svg_parts)).classes('w-full')
 
-                    nd = visible_nodes.get(node_id) or {}
-                    usr = nd.get('user') or {}
-                    short_name = (usr.get('shortName') or node_id[-4:]).upper()
-                    long_name = usr.get('longName') or ''
-
-                    inner_label = _escape(short_name[:5])
-                    name_label = _escape(long_name[:16]) if long_name else ''
-                    title_txt = _escape(f'{node_id} | {long_name or short_name} | reporter={is_reporter}')
-
-                    svg_parts.append(
-                        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="28" fill="{fill}" stroke="{stroke}" stroke-width="{stroke_width}"><title>{title_txt}</title></circle>'
-                    )
-                    if is_reporter:
-                        svg_parts.append(
-                            f'<text x="{x:.1f}" y="{y - 3:.1f}" text-anchor="middle" fill="{font_color}" font-size="16">🧭</text>'
-                        )
-                        svg_parts.append(
-                            f'<text x="{x:.1f}" y="{y + 16:.1f}" text-anchor="middle" fill="{font_color}" font-size="10">{inner_label}</text>'
-                        )
-                    else:
-                        svg_parts.append(
-                            f'<text x="{x:.1f}" y="{y + 5:.1f}" text-anchor="middle" fill="{font_color}" font-size="12">{inner_label}</text>'
-                        )
-                    if name_label:
-                        svg_parts.append(
-                            f'<text x="{x:.1f}" y="{y + 44:.1f}" text-anchor="middle" fill="#94a3b8" font-size="10">{name_label}</text>'
-                        )
-
-                svg_parts.append('</svg>')
-                ui.html(''.join(svg_parts)).classes('w-full')
-
-                with ui.row().classes('w-full flex-wrap gap-x-6 gap-y-1 mt-2'):
-                    ui.label('🧭 = node has reported neighbour info').classes('text-caption text-gray-500')
-                    ui.label('Arrow direction = neighbour to reporter').classes('text-caption text-gray-500')
+                    with ui.row().classes('w-full flex-wrap gap-x-6 gap-y-1 mt-2'):
+                        ui.label('🧭 = node has reported neighbour info').classes('text-caption text-gray-500')
+                        ui.label('Arrow direction = neighbour to reporter').classes('text-caption text-gray-500')
     
     def connect_tcp(self) -> None:
         """Connect via TCP."""
@@ -1781,7 +1785,21 @@ class MeshViewerGUI:
                                     ui.html('<span title="Cached from last session">💾</span>').classes('text-sm opacity-50')
                             if is_mqtt and topic_short:
                                 ui.label(topic_short).classes('text-caption font-mono text-blue-300 ml-2')
-                        with ui.row().classes('items-right'):
+                        with ui.row().classes('items-center gap-2 text-caption'):
+                            # Telemetry readings if available
+                            if 'deviceMetrics' in node:
+                                metrics = node.get('deviceMetrics', {})
+                                telemetry_parts = []
+                                if metrics.get('co2') is not None:
+                                    telemetry_parts.append(f"CO₂: {metrics.get('co2'):.0f}ppm")
+                                if metrics.get('co2Temperature') is not None:
+                                    telemetry_parts.append(f"T: {metrics.get('co2Temperature'):.1f}°C")
+                                if metrics.get('co2Humidity') is not None:
+                                    telemetry_parts.append(f"H: {metrics.get('co2Humidity'):.0f}%")
+                                if telemetry_parts:
+                                    ui.label(' | '.join(telemetry_parts)).classes('text-caption text-gray-400')
+                                    ui.html('<span title="Telemetry data available">🍃</span>').classes('text-sm')
+                            
                             self.render_last_heard(node)
                             if 'deviceMetrics' in node:
                                 self.render_battery_string(node, node_id=node_id)
@@ -1834,10 +1852,12 @@ class MeshViewerGUI:
 
     def _clear_nodes_display(self) -> None:
         """Clear the nodes display."""
-        self.nodes_container.clear()
-        ui_text = self.config.get_ui_text().get('nodes', {})
-        with self.nodes_container:
-            ui.label(ui_text.get('not_connected', 'Not connected')).classes('text-gray-500')
+        # Use lock to prevent concurrent mutations of NiceGUI's elements dict
+        with self._ui_update_lock:
+            self.nodes_container.clear()
+            ui_text = self.config.get_ui_text().get('nodes', {})
+            with self.nodes_container:
+                ui.label(ui_text.get('not_connected', 'Not connected')).classes('text-gray-500')
         # Reset node count display
         if hasattr(self, 'node_count_label'):
             self.node_count_label.update()
@@ -2408,7 +2428,7 @@ class MeshViewerGUI:
                         side='right',
                         overlaying='y',
                         anchor='free',
-                        position=1.15,
+                        position=1.0,
                         range=[0, 100],
                         tickformat='.0f'
                     ),
@@ -2471,7 +2491,7 @@ class MeshViewerGUI:
                     xaxis_title='Time',
                     yaxis=dict(title='CO₂ (ppm)', side='left', range=[400, 2000], tickformat='.0f'),
                     yaxis2=dict(title='Temperature (°C)', side='right', overlaying='y', range=[-10, 50], tickformat='.1f'),
-                    yaxis3=dict(title='Humidity (%)', side='right', overlaying='y', anchor='free', position=1.15, range=[0, 100], tickformat='.0f'),
+                    yaxis3=dict(title='Humidity (%)', side='right', overlaying='y', anchor='free', position=1.0, range=[0, 100], tickformat='.0f'),
                     hovermode='x unified',
                     template='plotly_dark' if self.dark.value else 'plotly_white',
                     height=500,
