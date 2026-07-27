@@ -5,6 +5,7 @@ import csv
 import json
 import os
 import time
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 import pandas as pd
@@ -221,8 +222,13 @@ class DataPersistence:
             return pd.DataFrame()
         
         try:
-            # Read CSV data
-            df = pd.read_csv(self.csv_file)
+            # Read CSV data with error handling for inconsistent field counts
+            try:
+                # Try modern pandas syntax first (>=1.3)
+                df = pd.read_csv(self.csv_file, on_bad_lines='skip')
+            except TypeError:
+                # Fallback for older pandas versions
+                df = pd.read_csv(self.csv_file, error_bad_lines=False)
             
             if df.empty:
                 return df
@@ -249,6 +255,7 @@ class DataPersistence:
             
         except Exception as e:
             print(f"Error reading battery history: {e}")
+            traceback.print_exc()
             return pd.DataFrame()
     
     def get_node_battery_history(self, node_id: str, days: float = 7) -> pd.DataFrame:
@@ -282,8 +289,13 @@ class DataPersistence:
             return pd.DataFrame()
         
         try:
-            # Read CSV data
-            df = pd.read_csv(self.csv_file)
+            # Read CSV data with error handling for inconsistent field counts
+            try:
+                # Try modern pandas syntax first (>=1.3)
+                df = pd.read_csv(self.csv_file, on_bad_lines='skip')
+            except TypeError:
+                # Fallback for older pandas versions
+                df = pd.read_csv(self.csv_file, error_bad_lines=False)
             
             if df.empty:
                 return df
@@ -305,6 +317,7 @@ class DataPersistence:
             
         except Exception as e:
             print(f"Error reading telemetry history: {e}")
+            traceback.print_exc()
             return pd.DataFrame()
     
     def get_node_telemetry_history(self, node_id: str, days: float = 7) -> pd.DataFrame:
