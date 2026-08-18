@@ -10,69 +10,130 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, Optional
 import pandas as pd
 
-
 class DataPersistence:
-    """Handles data persistence for node metrics and battery history."""
-    
-    def __init__(self, data_dir: str = "data"):
+    """Handles data persistence for node metrics and battery history (local filesystem)."""
+
+    def __init__(self, data_dir: str = "data", backend: str = "local", s3_bucket: Optional[str] = None, s3_prefix: str = ""):
         """
         Initialize the data persistence manager.
-        
+
         Args:
-            data_dir: Directory to store data files
+            data_dir: Directory to store data files (used for local backend and as temp workspace for S3)
+            backend: 'local' or 's3'
+            s3_bucket: S3 bucket name when using S3 backend
+            s3_prefix: Optional prefix (folder) within the S3 bucket
         """
+        self.backend = (backend or "local")
         self.data_dir = data_dir
+        if self.backend != 'local':
+            print(f"Warning: requested backend '{self.backend}' is not supported; falling back to local filesystem")
+            self.backend = 'local'
+
+        # Local file paths (used for local backend and as temp files for S3)
         self.csv_file = os.path.join(data_dir, "node_data.csv")
         self.json_file = os.path.join(data_dir, "node_data.json")
         self.neighbour_packets_file = os.path.join(data_dir, "neighbour_packets.json")
         self.reporter_aliases_file = os.path.join(data_dir, "reporter_aliases.json")
         self.reporter_visibility_file = os.path.join(data_dir, "reporter_visibility.json")
-        
-        # Create data directory if it doesn't exist
+
+        # Ensure data directory exists
         os.makedirs(data_dir, exist_ok=True)
-        
+
         # Initialize CSV file with headers if it doesn't exist
         self._initialize_csv()
-        
+
         # Track previous uptime values to detect changes
         self._previous_uptimes = {}
         # Track previous last-heard values so MQTT-only updates persist even when uptime is unchanged
         self._previous_last_heard = {}
-        
+
         # Load previous uptime values from existing data
         self._load_previous_uptimes()
+
+    # ---- Generic helpers (local filesystem only) ----
+    def _read_csv(self) -> pd.DataFrame:
+        """Return a DataFrame loaded from local CSV (or empty DataFrame)."""
+        if not os.path.exists(self.csv_file):
+            return pd.DataFrame()
+        try:
+            try:
+                return pd.read_csv(self.csv_file, on_bad_lines='skip')
+            except TypeError:
+                return pd.read_csv(self.csv_file, error_bad_lines=False)
+        except Exception as e:
+            print(f"Error reading CSV: {e}")
+            return pd.DataFrame()
+
+    def _append_to_csv_rows(self, rows: list[list]) -> None:
+        if not rows:
+            return
+        with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerows(rows)
+
+    def _append_to_ndjson(self, obj: Any) -> None:
+        """Append a JSON object as newline-delimited JSON to node_data.json (local)."""
+        line = json.dumps(obj) + '\n'
+        with open(self.json_file, 'a', encoding='utf-8') as f:
+            f.write(line)
+
+    def _read_json_file(self, filename: str) -> Optional[Any]:
+        """Read a JSON file (full JSON object) from local filesystem and return parsed object."""
+        path = os.path.join(self.data_dir, filename)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Error reading JSON {path}: {e}")
+            return None
+
+    def _write_json_file(self, filename: str, obj: Any) -> None:
+        path = os.path.join(self.data_dir, filename)
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(obj, f, indent=2)
+        except Exception as e:
+            print(f"Error writing JSON {path}: {e}")
+
+    def _read_ndjson_lines(self) -> list[str]:
+        """Return list of lines from node_data.json (ndjson) or empty list (local)."""
+        if not os.path.exists(self.json_file):
+            return []
+        try:
+            with open(self.json_file, 'r', encoding='utf-8') as f:
+                return f.readlines()
+        except Exception as e:
+            print(f"Error reading ndjson {self.json_file}: {e}")
+            return []
     
     def _initialize_csv(self) -> None:
         """Initialize CSV file with headers if it doesn't exist."""
+        headers = [
+            'timestamp', 'node_id', 'short_name', 'long_name', 'hw_model',
+            'battery_level', 'voltage', 'is_charging', 'uptime_hours',
+            'channel_utilization', 'last_heard', 'is_favorite',
+            'co2', 'co2_temperature', 'co2_humidity'
+        ]
+
         if not os.path.exists(self.csv_file):
-            headers = [
-                'timestamp', 'node_id', 'short_name', 'long_name', 'hw_model',
-                'battery_level', 'voltage', 'is_charging', 'uptime_hours',
-                'channel_utilization', 'last_heard', 'is_favorite',
-                'co2', 'co2_temperature', 'co2_humidity'
-            ]
             with open(self.csv_file, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(headers)
     
     def _load_previous_uptimes(self) -> None:
         """Load the most recent uptime values for each node from existing data."""
-        if not os.path.exists(self.csv_file):
+        df = self._read_csv()
+        if df.empty:
             return
-        
+
         try:
-            df = pd.read_csv(self.csv_file)
-            if df.empty:
-                return
-            
-            # Get the most recent uptime for each node
             latest_data = df.groupby('node_id')['uptime_hours'].last()
             self._previous_uptimes = latest_data.to_dict()
 
-            # Get the most recent last_heard for each node
             latest_last_heard = df.groupby('node_id')['last_heard'].last()
             self._previous_last_heard = latest_last_heard.to_dict()
-            
         except Exception as e:
             print(f"Warning: Could not load previous uptime values: {e}")
             self._previous_uptimes = {}
@@ -93,23 +154,19 @@ class DataPersistence:
         skip_csv_write = False
 
         # Check if we already have recent CSV data to avoid duplicates
-        if os.path.exists(self.csv_file):
-            try:
-                existing_df = pd.read_csv(self.csv_file)
-                if not existing_df.empty:
-                    # Check if we already have data for this exact timestamp
-                    existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'])
-
-                    # Find the latest timestamp and compare to current; skip if less than 4 minutes (240 seconds) after last one
-                    if not existing_df['timestamp'].empty:
-                        latest_existing_ts = existing_df['timestamp'].max()
-                        current_ts = pd.to_datetime(timestamp_str)
-                        time_diff = (current_ts - latest_existing_ts).total_seconds()
-                        if time_diff < 240:
-                            print(f"Data for timestamp {timestamp_str} is less than 4 minutes after previous ({latest_existing_ts}), skipping save")
-                            skip_csv_write = True
-            except Exception as e:
-                print(f"Warning: Could not check for existing data: {e}")
+        try:
+            existing_df = self._read_csv()
+            if not existing_df.empty:
+                existing_df['timestamp'] = pd.to_datetime(existing_df['timestamp'])
+                if not existing_df['timestamp'].empty:
+                    latest_existing_ts = existing_df['timestamp'].max()
+                    current_ts = pd.to_datetime(timestamp_str)
+                    time_diff = (current_ts - latest_existing_ts).total_seconds()
+                    if time_diff < 240:
+                        print(f"Data for timestamp {timestamp_str} is less than 4 minutes after previous ({latest_existing_ts}), skipping save")
+                        skip_csv_write = True
+        except Exception as e:
+            print(f"Warning: Could not check for existing data: {e}")
         
         # Prepare data for CSV
         csv_rows = []
@@ -191,13 +248,10 @@ class DataPersistence:
         
         # Write to CSV
         if csv_rows:
-            with open(self.csv_file, 'a', newline='', encoding='utf-8') as f:
-                writer = csv.writer(f)
-                writer.writerows(csv_rows)
-        
+            self._append_to_csv_rows(csv_rows)
+
         # Write to JSON (append to file with timestamp)
-        with open(self.json_file, 'a', encoding='utf-8') as f:
-            f.write(json.dumps(json_data) + '\n')
+        self._append_to_ndjson(json_data)
         
         # Update the previous uptime tracking for saved nodes
         for node_id, node in nodes_data.items():
@@ -218,17 +272,10 @@ class DataPersistence:
         Returns:
             DataFrame with battery history data
         """
-        if not os.path.exists(self.csv_file):
-            return pd.DataFrame()
-        
+        df = self._read_csv()
         try:
-            # Read CSV data with error handling for inconsistent field counts
-            try:
-                # Try modern pandas syntax first (>=1.3)
-                df = pd.read_csv(self.csv_file, on_bad_lines='skip')
-            except TypeError:
-                # Fallback for older pandas versions
-                df = pd.read_csv(self.csv_file, error_bad_lines=False)
+            if df.empty:
+                return df
             
             if df.empty:
                 return df
@@ -351,12 +398,10 @@ class DataPersistence:
                 restored['_from_persistence'] = True
                 nodes[str(node_id)] = restored
 
-        if not os.path.exists(self.csv_file):
+        df = self._read_csv()
+        if df.empty:
             return nodes
         try:
-            df = pd.read_csv(self.csv_file)
-            if df.empty:
-                return nodes
 
             # Keep only the latest row per node
             df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -411,40 +456,37 @@ class DataPersistence:
                     continue
                 seen.add(key)
                 deduped_packets.append(packet)
-            count_to_save = len(deduped_packets[-5000:])
-            print(f"DEBUG: Saving {count_to_save} deduplicated neighbour packets to {self.neighbour_packets_file}")
-            with open(self.neighbour_packets_file, 'w', encoding='utf-8') as f:
-                json.dump(deduped_packets[-5000:], f)
-            print(f"DEBUG: Successfully wrote {count_to_save} packets to file")
+            to_save = deduped_packets[-5000:]
+            count_to_save = len(to_save)
+            print(f"DEBUG: Saving {count_to_save} deduplicated neighbour packets")
+            self._write_json_file('neighbour_packets.json', to_save)
+            print(f"DEBUG: Successfully saved {count_to_save} neighbour packets")
         except Exception as e:
             print(f"Warning: Could not save neighbour packets: {e}")
 
     def get_neighbour_packets(self) -> list[Dict[str, Any]]:
         """Load persisted neighbour packets."""
-        if not os.path.exists(self.neighbour_packets_file):
-            print(f"DEBUG: Neighbour packets file does not exist at {self.neighbour_packets_file}")
-            return []
         try:
-            with open(self.neighbour_packets_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            print(f"DEBUG: Loaded {len(data) if isinstance(data, list) else 'invalid'} neighbour packets from file")
-            if isinstance(data, list):
-                deduped_packets = []
-                seen = set()
-                for packet in data:
-                    reporter = packet.get('payload', {}).get('node_id', packet.get('from'))
-                    timestamp = int(packet.get('timestamp', 0) or 0)
-                    canonical = json.dumps(packet, sort_keys=True, separators=(',', ':'))
-                    key = (str(reporter), timestamp, canonical)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    deduped_packets.append(packet)
-                print(f"DEBUG: After deduplication, {len(deduped_packets)} neighbour packets")
-                return deduped_packets
+            data = self._read_json_file('neighbour_packets.json')
+            if not isinstance(data, list):
+                return []
+            print(f"DEBUG: Loaded {len(data)} neighbour packets")
+            deduped_packets = []
+            seen = set()
+            for packet in data:
+                reporter = packet.get('payload', {}).get('node_id', packet.get('from'))
+                timestamp = int(packet.get('timestamp', 0) or 0)
+                canonical = json.dumps(packet, sort_keys=True, separators=(',', ':'))
+                key = (str(reporter), timestamp, canonical)
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped_packets.append(packet)
+            print(f"DEBUG: After deduplication, {len(deduped_packets)} neighbour packets")
+            return deduped_packets
         except Exception as e:
             print(f"Warning: Could not load neighbour packets: {e}")
-        return []
+            return []
 
     def save_reporter_aliases(self, aliases: Dict[str, str]) -> None:
         """Persist reporter-node nickname mappings."""
@@ -456,18 +498,14 @@ class DataPersistence:
                 if not key or not value:
                     continue
                 clean_aliases[key] = value
-            with open(self.reporter_aliases_file, 'w', encoding='utf-8') as f:
-                json.dump(clean_aliases, f, indent=2, sort_keys=True)
+            self._write_json_file('reporter_aliases.json', clean_aliases)
         except Exception as e:
             print(f"Warning: Could not save reporter aliases: {e}")
 
     def get_reporter_aliases(self) -> Dict[str, str]:
         """Load reporter-node nickname mappings."""
-        if not os.path.exists(self.reporter_aliases_file):
-            return {}
         try:
-            with open(self.reporter_aliases_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = self._read_json_file('reporter_aliases.json')
             if not isinstance(data, dict):
                 return {}
             aliases: Dict[str, str] = {}
@@ -490,18 +528,14 @@ class DataPersistence:
                 if not key:
                     continue
                 clean_visibility[key] = bool(visible)
-            with open(self.reporter_visibility_file, 'w', encoding='utf-8') as f:
-                json.dump(clean_visibility, f, indent=2, sort_keys=True)
+            self._write_json_file('reporter_visibility.json', clean_visibility)
         except Exception as e:
             print(f"Warning: Could not save reporter visibility: {e}")
 
     def get_reporter_visibility(self) -> Dict[str, bool]:
         """Load reporter-node visibility mappings."""
-        if not os.path.exists(self.reporter_visibility_file):
-            return {}
         try:
-            with open(self.reporter_visibility_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = self._read_json_file('reporter_visibility.json')
             if not isinstance(data, dict):
                 return {}
             visibility: Dict[str, bool] = {}
@@ -521,19 +555,13 @@ class DataPersistence:
         Returns:
             Dictionary with latest node data or None if no data exists
         """
-        if not os.path.exists(self.json_file):
-            return None
-        
         try:
-            with open(self.json_file, 'r', encoding='utf-8') as f:
-                lines = f.readlines()
-                if lines:
-                    # Get the last line (most recent data)
-                    latest_data = json.loads(lines[-1].strip())
-                    return latest_data
+            lines = self._read_ndjson_lines()
+            if lines:
+                latest_data = json.loads(lines[-1].strip())
+                return latest_data
         except Exception as e:
             print(f"Error reading latest data: {e}")
-        
         return None
     
     def cleanup_old_data(self, days_to_keep: int = 30) -> None:
@@ -556,7 +584,7 @@ class DataPersistence:
             
             # Write back the filtered data
             df_to_keep.to_csv(self.csv_file, index=False)
-            
+
             print(f"Cleaned up data older than {days_to_keep} days")
             
         except Exception as e:

@@ -293,3 +293,41 @@ To reset to defaults:
 - [CLI Reference](cli.md) - Command-line interface documentation
 - [Main Documentation](index.md) - Feature overview and usage
 
+## Persistent storage (local deployments & cloud)
+
+MeshMonitor stores runtime data (CSV/NDJSON/JSON) under a data directory. You can control where that persistent data is written using the `app.data_dir` configuration key in `config.yaml`.
+
+Example `config.yaml` snippet:
+
+```yaml
+app:
+  data_dir: "/var/lib/meshmonitor/data"   # path where node_data.csv, node_data.json, etc. are stored
+  data_backend: "local"                  # currently only 'local' filesystem is supported
+```
+
+Recommendations:
+
+- Local development: use a path inside the project (default `data/`) or a dedicated folder under the user's home directory.
+- Cloud / EC2 deployments: mount a persistent volume at the path you set for `app.data_dir` so data survives redeploys.
+  - For single-instance EC2, attach an EBS volume and mount it (e.g. `/mnt/meshdata`), then set `app.data_dir` to that mount.
+  - For multi-instance or autoscaling scenarios, use a shared filesystem like EFS and mount it to the same path on each instance.
+
+Quick EC2 example (attach & mount EBS):
+
+```bash
+# create filesystem, attach EBS, format and mount (example)
+sudo mkfs -t ext4 /dev/xvdf
+sudo mkdir -p /mnt/meshdata
+sudo mount /dev/xvdf /mnt/meshdata
+# make mount persistent in /etc/fstab (use UUID)
+sudo blkid /dev/xvdf
+# then add entry to /etc/fstab using the returned UUID
+```
+
+After mounting, set `app.data_dir` in `config.yaml` to `/mnt/meshdata` (or the mount you chose). On redeploy, as long as the volume is reattached/mounted to the same path, MeshMonitor will continue to read/write the same persistent files.
+
+Notes:
+
+- The application currently supports local filesystem persistence only. If you want the app to store files in S3 or another remote store, implement a mount (EFS, S3FS, or similar) on the host so the application continues to use a normal filesystem path.
+- Back up the mounted volume regularly if you need long-term retention.
+

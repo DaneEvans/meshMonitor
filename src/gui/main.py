@@ -47,8 +47,15 @@ class MeshViewerGUI:
         self.show_mqtt_nodes = True
         self.nodes_data: Dict[str, Any] = {}
         
-        # Initialize data persistence
-        self.data_persistence = DataPersistence()
+        # Initialize data persistence (backend configurable via config)
+        data_backend = self.config.get('app.data_backend', 'local')
+        data_dir = self.config.get('app.data_dir', 'data')
+        if data_backend == 's3':
+            s3_bucket = self.config.get('s3.bucket') or self.config.get('s3_bucket')
+            s3_prefix = self.config.get('s3.prefix', '')
+            self.data_persistence = DataPersistence(data_dir, backend='s3', s3_bucket=s3_bucket, s3_prefix=s3_prefix)
+        else:
+            self.data_persistence = DataPersistence(data_dir, backend='local')
         
         # Get active threshold from config
         node_settings = self.config.get_node_settings()
